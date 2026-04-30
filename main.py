@@ -14,16 +14,14 @@ client = genai.Client(api_key=API_KEY)
 
 # Extraer las ofertas del SECOP II
 def obtener_ofertas_secop():
-    try:
 
-        client = Socrata("www.datos.gov.co",TOKEN)
-        results = client.get("jbjy-vk9h", order="fecha_de_firma DESC",
-                             limit=5,where="fecha_de_firma between '2025-01-01' and '2025-12-31'")
+    client = Socrata("www.datos.gov.co",TOKEN)
+    results = client.get("jbjy-vk9h", order="fecha_de_firma DESC",
+                         limit=5,where="fecha_de_firma between '2025-01-01' and '2025-12-31'")
 
-        return results
-    except Exception as e:
-        print(f"Ocurrió un error SECOP II: {e}")
+    return results
 
+# Análisis de los datos del SECOP II con los de la Universidad
 def analizar_con_gemini(data_oferta):
     """Envía los datos de la oferta a Gemini para análisis."""
     prompt = f"""
@@ -41,7 +39,8 @@ def analizar_con_gemini(data_oferta):
     Por favor, genera un análisis estructurado con lo siguiente:
     1. Entidad y Objeto del contrato (Muy breve).
     2. Valor Estimado.
-    3. VEREDICTO DE VIABILIDAD: Analiza los datos de la oferta. Si la oferta menciona requisitos financieros, compáralos con nuestros datos. Responde en mayúsculas: "VIABLE", "NO VIABLE", o "REQUIERE LEER PLIEGO COMPLETO" (si los datos de Socrata no traen los indicadores requeridos).
+    3. VEREDICTO DE VIABILIDAD: Analiza los datos de la oferta. Si la oferta menciona requisitos financieros, compáralos con nuestros datos. 
+    Responde en mayúsculas: "VIABLE", "NO VIABLE", o "REQUIERE LEER PLIEGO COMPLETO" (si los datos de Socrata no traen los indicadores requeridos).
     4. Justificación del veredicto (1 párrafo).
     """
 
