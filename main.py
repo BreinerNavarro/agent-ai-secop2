@@ -16,8 +16,7 @@ client = genai.Client(api_key=API_KEY)
 def obtener_ofertas_secop():
 
     client = Socrata("www.datos.gov.co",TOKEN)
-    results = client.get("jbjy-vk9h", order="fecha_de_firma DESC",
-                         limit=5,where="fecha_de_firma between '2025-01-01' and '2025-12-31'")
+    results = client.get("p6dx-8zbt", order="fecha_de_publicacion_del DESC",limit=5)
 
     return results
 
@@ -63,7 +62,7 @@ try:
     for oferta in ofertas:
         # Tomamos la primera oferta para la prueba
         primera_oferta = oferta
-        print(f"Analizando oferta: {primera_oferta.get('descripcion_del_proceso', 'Sin nombre')}")
+        print(f"Analizando oferta: {primera_oferta.get('descripci_n_del_procedimiento', 'Sin nombre')}")
 
         analisis = analizar_con_gemini(primera_oferta)
         print("\n--- RESUMEN DE GEMINI ---")
