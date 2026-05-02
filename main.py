@@ -10,13 +10,13 @@ API_KEY = os.environ.get("API_KEY_GEMINI_PROFE")
 TOKEN = os.environ.get("TOKEN")
 
 # Configuración del cliente api Apikey
-client = genai.Client(api_key=API_KEY)
+gemini_client = genai.Client(api_key=API_KEY)
 
 # Extraer las ofertas del SECOP II
 def obtener_ofertas_secop():
 
-    client = Socrata("www.datos.gov.co",TOKEN)
-    results = client.get("p6dx-8zbt", order="fecha_de_publicacion_del DESC",limit=5)
+    socrata_client = Socrata("www.datos.gov.co",TOKEN)
+    results = socrata_client.get("p6dx-8zbt", order="fecha_de_publicacion_del DESC",limit=5)
 
     return results
 
@@ -43,14 +43,13 @@ def analizar_con_gemini(data_oferta):
     4. Justificación del veredicto (1 párrafo).
     """
 
-    response = client.models.generate_content(
+    response = gemini_client.models.generate_content(
         model="gemini-2.5-flash-lite",
         contents=prompt
     )
-
     return response.text
 
-# --- EJECUCIÓN ---
+# EJECUCIÓN DEL PROGRAMA
 try:
     print("Obteniendo datos del SECOP II...")
     ofertas = obtener_ofertas_secop()
@@ -58,16 +57,21 @@ try:
 
     if len(ofertas) == 0:
         print(f"No se encontraron ofertas.")
+    else:
+        print(f"Se encontraron {len(ofertas)} ofertas.")
 
     for oferta in ofertas:
-        # Tomamos la primera oferta para la prueba
-        primera_oferta = oferta
-        print(f"Analizando oferta: {primera_oferta.get('descripci_n_del_procedimiento', 'Sin nombre')}")
+        
+        nombre_oferta = oferta.get('descripci_n_del_procedimiento', 'Sin nombre')
+        print(f"Analizando oferta: {nombre_oferta}")
 
-        analisis = analizar_con_gemini(primera_oferta)
+        analisis = analizar_con_gemini(oferta)
         print("\n--- RESUMEN DE GEMINI ---")
         print(analisis)
 
+        # Detenemos el bucle después de la primera iteración para la prueba
+        #print("\n[Nota: Prueba finalizada. Solo se analizó la primera oferta].")
+        #break
 
 except Exception as e:
     print(f"Ocurrió un error: {e}")
