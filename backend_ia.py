@@ -2,6 +2,7 @@
 from google import genai
 from sodapy import Socrata
 from dotenv import load_dotenv
+import time
 import os
 import json
 from datetime import datetime, timedelta
@@ -25,7 +26,7 @@ DATOS_UNIVERSIDAD = """
 """
 
 # Extraer las ofertas del SECOP II
-def obtener_ofertas_secop(limite=3, palabra_clave=None):
+def obtener_ofertas_secop(limite=5, palabra_clave=None):
     """Descarga las ofertas del SECOP II, opcionalmente filtradas por palabra clave."""
     try:
         # Si el usuario escribió una palabra clave, usamos el parámetro 'q' de Socrata (Full text search)

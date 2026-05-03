@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime
 import backend_ia 
+import time
 
 # ---  CONFIGURACIÓN DE LA PÁGINA ---
 st.set_page_config(page_title="IA SECOP - Universidad", page_icon="🎓", layout="wide")
@@ -70,8 +71,13 @@ with col_btn:
                 barra_progreso = st.progress(0)
                 for i, oferta in enumerate(ofertas_crudas):
                     analisis = backend_ia.analizar_con_gemini(oferta)
-                    if analisis: st.session_state.resultados_analisis.append(analisis)
+                    if analisis: 
+                        st.session_state.resultados_analisis.append(analisis)
                     barra_progreso.progress((i + 1) / len(ofertas_crudas))
+                    
+                    # --- NUEVA LÍNEA: Pausa de 3 segundos para no saturar la API gratuita ---
+                    time.sleep(5) 
+                    
                 st.success("¡Análisis completado!")
 
 # ---  DIBUJAR DASHBOARD CON FILTROS APLICADOS ---
