@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime
-import backend_ia 
+import backend_ia
 import time
 
 # --- CONFIGURACIÓN DE LA PÁGINA ---
@@ -26,7 +26,7 @@ st.markdown("""
         max-width: 85% !important; /* Para que deje ver el fondo gris alrededor */
     }
 
-    /* Barra Lateral (Sidebar Dark) */
+    /* Barra Lateral */
     [data-testid="stSidebar"] {
         background-color: #002A42 !important; /* Azul Oscuro Unicafam */
     }
@@ -42,7 +42,7 @@ st.markdown("""
         font-weight: bold;
     }
 
-    /* Botón Principal con Degradado (Estilo de la imagen) */
+    /* Botón Principal con Degradado */
     .stButton > button {
         background: linear-gradient(90deg, #1DD2C1 0%, #0083BF 100%) !important;
         color: white !important;
@@ -111,7 +111,7 @@ st.markdown("""
 # --- BARRA LATERAL ---
 # Intentamos cargar el logo en la barra lateral
 try:
-    st.sidebar.image("Agent_lateral.png", width=100)
+    st.sidebar.image("Agent_lateral.png", width=150)
 except:
     pass # Si falla, simplemente no lo muestra para no romper la app
 
@@ -144,9 +144,8 @@ with col_centro:
             st.warning("⚠️ No se encontró 'Agent_Principal.png'. Verifica que esté en la carpeta.")
     # --------------------------------
     
-    # Quité el emoji del escudo porque ahora está tu logo oficial
     #st.markdown("<h1 style='text-align: center;'>Agente SECOP Unicafam</h1>", unsafe_allow_html=True)
-    st.markdown("<h3 style='text-align: center;'>Bienvenido a tu agente IA de contratación con el estado</h3>", unsafe_allow_html=True)
+    st.markdown("<h3 style='text-align: center;'>Bienvenido a tu agente IA de contratación SECOP II</h3>", unsafe_allow_html=True)
     st.markdown("<p style='text-align: center;'>Su interfaz de IA integral para una supervisión y postulación eficiente.</p><br>", unsafe_allow_html=True)
     
     # Cuadro de búsqueda central
@@ -180,7 +179,7 @@ if btn_analizar:
                 if analisis: 
                     st.session_state.resultados_analisis.append(analisis)
                 barra_progreso.progress((i + 1) / len(ofertas_crudas))
-                time.sleep(3) 
+                time.sleep(5)
             st.success("¡Análisis completado con éxito!")
 
 
