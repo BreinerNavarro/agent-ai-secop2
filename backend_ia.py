@@ -26,7 +26,7 @@ DATOS_UNIVERSIDAD = """
 """
 
 # Extraer las ofertas del SECOP II
-def obtener_ofertas_secop(limite=5, palabra_clave=None):
+def obtener_ofertas_secop(limite=10, palabra_clave=None):
     """Descarga las ofertas del SECOP II, opcionalmente filtradas por palabra clave."""
     try:
         # Si el usuario escribió una palabra clave, usamos el parámetro 'q' de Socrata (Full text search)
@@ -50,7 +50,7 @@ def obtener_ofertas_secop(limite=5, palabra_clave=None):
         return []
 
 # Análisis de los datos del SECOP II con los de la Universidad
-def analizar_con_gemini(oferta):
+def analizar_oferta_ia(oferta):
     # Extraccion de informacion para darsela a la IA
     entidad = oferta.get('entidad', 'Entidad Desconocida')
     descripcion = oferta.get('descripci_n_del_procedimiento', 'Sin descripción')
