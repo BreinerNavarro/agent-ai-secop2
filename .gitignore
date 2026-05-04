@@ -13,3 +13,4 @@ venv/
 # Datos pesados
 datasets/
 temp/
+__pycache__
