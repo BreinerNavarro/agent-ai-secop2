@@ -34,7 +34,7 @@ html, body, [class*="css"] { font-family: 'Montserrat', sans-serif !important; }
 }
 
 [data-testid="stSidebar"] { background-color: #002A42 !important; }
-[data-testid="stSidebar"] * { color: #FFFFFF !important; }
+[data-testid="stSidebar"] * { color: #E8F4FD !important; }
 
 .sidebar-menu-active {
     border-left: 4px solid #1DD2C1;
@@ -42,7 +42,13 @@ html, body, [class*="css"] { font-family: 'Montserrat', sans-serif !important; }
     padding: 10px 15px;
     margin-left: -15px;
     font-weight: bold;
-    border-radius: 0 8px 8px 0;
+    border-radius: 0 8px 8px 0; 
+}
+
+[data-testid="stNumberInput"] input {
+    color: #0083BF !important; /* Azul Unicafam */
+    font-weight: 800 !important;
+    font-size: 1.1rem !important;
 }
 
 .stButton > button {
