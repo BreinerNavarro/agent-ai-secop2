@@ -257,14 +257,14 @@ st.sidebar.divider()
 
 # --- Modo API ---
 st.sidebar.markdown("#### ⚙️ Configuración de IA")
-delay_gemini = st.sidebar.slider(
-    "Delay entre llamadas Gemini (seg):",
-    min_value=2.0, max_value=10.0, value=4.0, step=0.5,
-    help="API gratuita: 4s (15 RPM). API de pago: 2s. Si ves errores 429 aumenta este valor.",
+delay_groq = st.sidebar.slider(
+    "Delay entre llamadas Groq (seg):",
+    min_value=0.0, max_value=4.0, value=2.0, step=0.5,
+    help="Groq gratis: mínimo 2s (30 req/min). En 0 puede dar error 429 si analizas más de 5 ofertas seguidas.",
 )
 st.sidebar.caption(
-    "🆓 **Free tier**: 15 solicitudes/minuto → usa 4–5 s\n"
-    "💳 **Paid tier**: puedes bajar a 2 s"
+    "🆓 **Free tier**: 30 solicitudes/minuto → usa 2–3 s\n"
+    "💳 **Paid tier**: puedes bajar a 0 s"
 )
 
 st.sidebar.divider()
@@ -379,7 +379,7 @@ with tab_analisis:
             en_cache  = sum(1 for o in ofertas_filtradas
                             if o.get("id_del_proceso") in backend_ia._cache_analisis)
             a_analizar = total - en_cache
-            tiempo_est = a_analizar * delay_gemini
+            tiempo_est = a_analizar * delay_groq
 
             st.info(
                 f"✅ **{total} oferta(s)** pasaron el pre-filtro. "
@@ -387,19 +387,19 @@ with tab_analisis:
                 f"(tiempo estimado: ~{int(tiempo_est)}–{int(tiempo_est) + 10} seg con API gratuita)."
             )
 
-            barra      = st.progress(0, text="Iniciando análisis con Gemini...")
+            barra      = st.progress(0, text="Iniciando análisis con Groq...")
             status_txt = st.empty()
 
             def actualizar_progreso(completados, total_t, id_proc, desde_cache):
                 pct = completados / total_t if total_t > 0 else 0
-                origen = "⚡ caché" if desde_cache else "🧠 IA Gemini"
+                origen = "⚡ caché" if desde_cache else "🧠 IA Groq"
                 msg = f"[{completados}/{total_t}] {origen} → {id_proc}"
                 barra.progress(pct, text=msg)
                 status_txt.caption(msg)
 
             resultados_nuevos = backend_ia.analizar_ofertas_secuencial(
                 ofertas=ofertas_filtradas,
-                delay_segundos=float(delay_gemini),
+                delay_segundos=float(delay_groq),
                 callback_progreso=actualizar_progreso,
             )
 

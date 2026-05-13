@@ -10,15 +10,17 @@ import json
 import pandas as pd
 import io
 import time
+from groq import Groq
 from datetime import datetime, timedelta
 
 # --- Carga de variables de entorno ---
 load_dotenv()
-API_KEY = os.environ.get("APIKEY_OTRA")
+API_KEY = os.environ.get("GROQ_API_KEY")
 TOKEN   = os.environ.get("TOKEN")
 
 # --- Clientes ---
-gemini_client  = genai.Client(api_key=API_KEY)
+#gemini_client = genai.Client(api_key=API_KEY)
+groq_client = Groq(api_key=API_KEY)
 socrata_client = Socrata("www.datos.gov.co", TOKEN)
 
 # --- Caché en memoria: evita re-analizar el mismo proceso en la misma sesión ---
@@ -547,13 +549,20 @@ RESPONDE ÚNICA Y ESTRICTAMENTE EN JSON. Sin texto antes ni después. Sin backti
 """
 
     try:
-        response = gemini_client.models.generate_content(
-            model="gemini-2.5-flash-lite",
-            contents=prompt,
+        # llamamos al formato de Groq
+        response = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.7,
+            # Esto asegura que Groq intente devolver un JSON si tu prompt lo pide
+            response_format={"type": "json_object"}
         )
-        texto_limpio  = response.text.replace("```json", "").replace("```", "").strip()
-        analisis_dict = json.loads(texto_limpio)
 
+        # 4. Accedemos al texto de la respuesta de forma correcta
+        # Aquí extraemos el texto (el JSON) y lo convertimos en un diccionario de Python
+        analisis_dict = json.loads(response.choices[0].message.content)
         # Guardar en caché
         _cache_analisis[id_proceso] = analisis_dict
         return analisis_dict
@@ -674,11 +683,20 @@ INSTRUCCIONES:
 """
 
     try:
-        response = gemini_client.models.generate_content(
-            model="gemini-2.5-flash-lite",
-            contents=prompt,
+
+        # 'response' recibe todo el paquete de Groq
+        response = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"}
         )
-        return response.text.strip()
+
+        # Aquí extraemos el texto (el JSON) y lo convertimos en un diccionario de Python
+        resultado_final = json.loads(response.choices[0].message.content)
+
+        return resultado_final
+
+
     except Exception as e:
         print(f"[ERROR Resumen Ejecutivo] {e}")
         return "No se pudo generar el resumen ejecutivo automático."
