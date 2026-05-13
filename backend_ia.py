@@ -15,12 +15,12 @@ from datetime import datetime, timedelta
 
 # --- Carga de variables de entorno ---
 load_dotenv()
-API_KEY = os.environ.get("APIKEY_OTRA")
+API_KEY = os.environ.get("GROQ_API_KEY")
 TOKEN   = os.environ.get("TOKEN")
 
 # --- Clientes ---
 #gemini_client = genai.Client(api_key=API_KEY)
-groq_client = Groq(api_key="API_KEY")
+groq_client = Groq(api_key=API_KEY)
 socrata_client = Socrata("www.datos.gov.co", TOKEN)
 
 # --- Caché en memoria: evita re-analizar el mismo proceso en la misma sesión ---
