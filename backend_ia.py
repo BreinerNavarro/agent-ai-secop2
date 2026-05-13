@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 
 # --- Carga de variables de entorno ---
 load_dotenv()
-API_KEY = os.environ.get("API_KEY_GEMINI_TAWNEE")
+API_KEY = os.environ.get("API_KEY_GEMINI_PROFE")
 TOKEN   = os.environ.get("TOKEN")
 
 # --- Clientes ---
