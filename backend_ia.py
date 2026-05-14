@@ -429,6 +429,14 @@ def analizar_oferta_ia(oferta: dict) -> dict | None:
     nombre_proc  = oferta.get("nombre_del_procedimiento", "Sin nombre")
     descripcion  = oferta.get("descripci_n_del_procedimiento", "Sin descripción")
     cuantia      = oferta.get("precio_base", "No especificado")
+    try:
+        # Convertirlo a número
+        valor_numerico = float(cuantia)
+        # Formateamos con puntos como separadores de miles
+        cuantia_num = f"{valor_numerico:,.0f}".replace(",", ".")
+    except (ValueError, TypeError):
+        # Si no es un número (ej: "No especificado"), lo dejamos como está
+        cuantia_num = cuantia
     modalidad    = oferta.get("modalidad_de_contratacion", "No especificada")
     tipo_contrato= oferta.get("tipo_de_contrato", "No especificado")
     unspsc       = oferta.get("codigo_principal_de_categoria", "No especificado")
@@ -491,7 +499,7 @@ DATOS DEL PROCESO SECOP II
 - Objeto del Contrato      : {descripcion}
 - Tipo de Contrato         : {tipo_contrato}
 - Modalidad                : {modalidad}
-- Valor Estimado           : ${cuantia} COP
+- Valor Estimado           : ${cuantia_num} COP
 - Duración                 : {duracion_texto}
 - Código UNSPSC Principal  : {unspsc}
 - Contexto UNSPSC          : {contexto_unspsc}
@@ -539,7 +547,7 @@ RESPONDE ÚNICA Y ESTRICTAMENTE EN JSON. Sin texto antes ni después. Sin backti
     "riesgos"                 : ["Riesgo concreto 1", "Riesgo 2"],
     "acciones_mejora"         : ["Acción ejecutable específica 1", "Acción 2", "Acción 3"],
     "recomendacion"           : "Párrafo ejecutivo máximo 3 líneas: veredicto + justificación estratégica + próximo paso.",
-    "valor_estimado"          : "{cuantia}",
+    "valor_estimado"          : "{cuantia_num}",
     "duracion_contrato"       : "{duracion_texto}",
     "modalidad"               : "{modalidad}",
     "fecha_cierre"            : "{fecha_cierre}",
