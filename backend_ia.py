@@ -691,19 +691,16 @@ INSTRUCCIONES:
 """
 
     try:
-
         # 'response' recibe todo el paquete de Groq
         response = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
-            messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"}
+            messages=[{"role": "user", "content": prompt}]
         )
 
-        # Aquí extraemos el texto (el JSON) y lo convertimos en un diccionario de Python
-        resultado_final = json.loads(response.choices[0].message.content)
+        # Aquí extraemos directamente el texto generado por el modelo
+        resultado_final = response.choices[0].message.content
 
         return resultado_final
-
 
     except Exception as e:
         print(f"[ERROR Resumen Ejecutivo] {e}")
