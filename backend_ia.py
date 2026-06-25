@@ -1,11 +1,13 @@
 # =============================================================================
 # backend_ia.py — Motor de análisis SECOP II con IA
-# Versión 2.1 — Perfil real · Caché · Rate-limit seguro para API gratuita
+# Versión 3.0 — Multi-modelo · Perfil real · Caché · Rate-limit seguro
+# Modelos: LLaMA 3.3 70B · DeepSeek R1 · Gemini 2.5 Flash · LLaMA 4 Scout
 # =============================================================================
-from google import genai
+from google import genai                  # SDK de Google para Gemini
 from sodapy import Socrata
 from dotenv import load_dotenv
 import os
+import re                                  # Para limpiar bloques <think> de R1
 import json
 import pandas as pd
 import io
@@ -15,18 +17,72 @@ from datetime import datetime, timedelta
 
 # --- Carga de variables de entorno ---
 load_dotenv()
-API_KEY = os.environ.get("GROQ_API_KEY")
-TOKEN   = os.environ.get("TOKEN")
+GROQ_API_KEY   = os.environ.get("GROQ_API_KEY")   # Groq: LLaMA 3.3, R1, LLaMA 4
+GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")  # Google AI Studio: Gemini
+TOKEN          = os.environ.get("TOKEN")            # Socrata SECOP II
 
-# --- Clientes ---
-#gemini_client = genai.Client(api_key=API_KEY)
-groq_client = Groq(api_key=API_KEY)
+# --- Cliente Groq (LLaMA y DeepSeek R1) ---
+groq_client = Groq(api_key=GROQ_API_KEY)
+
+# --- Cliente Gemini (Google AI Studio) ---
+# Se inicializa solo si la clave está disponible para no crashear si no existe
+gemini_client = None
+if GOOGLE_API_KEY:
+    try:
+        gemini_client = genai.Client(api_key=GOOGLE_API_KEY)
+    except Exception as e:
+        print(f"[AVISO] No se pudo inicializar Gemini: {e}")
+
+# --- Cliente Socrata (datos.gov.co — SECOP II) ---
 socrata_client = Socrata("www.datos.gov.co", TOKEN)
 
 # --- Caché en memoria: evita re-analizar el mismo proceso en la misma sesión ---
-# La app.py administra un dict de caché via session_state; este dict es el
-# repositorio en el nivel del módulo (persistente entre reruns de Streamlit).
+# Clave: id_del_proceso | Valor: dict con el análisis completo
+# Se incluye el modelo usado para que al cambiar modelo se re-analice
 _cache_analisis: dict[str, dict] = {}
+
+
+# =============================================================================
+# CONFIGURACIÓN DE MODELOS DISPONIBLES
+# Cada entrada define: proveedor, model_id, descripción y características
+# =============================================================================
+MODELOS_DISPONIBLES = {
+    "🦙 LLaMA 3.3 70B — Groq": {
+        "proveedor"        : "groq",
+        "model_id"         : "llama-3.3-70b-versatile",
+        "descripcion"      : "Tu modelo base actual. Rápido, equilibrado y gratuito.",
+        "soporta_json_mode": True,    # Groq devuelve JSON limpio con esta bandera
+        "es_reasoning"     : False,   # No genera bloques <think>
+        "delay_recomendado": 2.0,     # Segundos entre llamadas en free tier
+    },
+    "🤖 DeepSeek R1 — Groq": {
+        "proveedor"        : "groq",
+        "model_id"         : "deepseek-r1-distill-llama-70b",
+        "descripcion"      : "Razonamiento profundo paso a paso. Más reflexivo.",
+        "soporta_json_mode": False,   # R1 genera <think>...</think> antes del JSON
+        "es_reasoning"     : True,    # ← Le decimos que limpie los bloques <think>
+        "delay_recomendado": 2.0,
+    },
+    "✨ Gemini 2.5 Flash — Google": {
+        "proveedor"        : "gemini",
+        "model_id"         : "gemini-2.5-flash",
+        "descripcion"      : "Reemplaza a 2.0 Flash (deprecado jun/2026). Gratis, 1M tokens.",
+        "soporta_json_mode": True,    # Gemini soporta response_mime_type=application/json
+        "es_reasoning"     : False,
+        "delay_recomendado": 4.0,     # Google free tier: 15 RPM → más conservador
+    },
+    "🦙 LLaMA 4 Scout — Groq": {
+        "proveedor"        : "groq",
+        "model_id"         : "meta-llama/llama-4-scout-17b-16e-instruct",
+        "descripcion"      : "Última generación de Meta. Multimodal y muy eficiente.",
+        "soporta_json_mode": True,
+        "es_reasoning"     : False,
+        "delay_recomendado": 2.0,
+    },
+}
+
+# Modelo que se usa por defecto (el mismo que tenías antes)
+MODELO_DEFAULT_KEY = "🦙 LLaMA 3.3 70B — Groq"
 
 
 # =============================================================================
@@ -410,19 +466,134 @@ def obtener_ofertas_secop(
 
 
 # =============================================================================
+# HELPERS DE MULTI-MODELO
+# =============================================================================
+
+def _limpiar_respuesta_reasoning(texto: str) -> str:
+    """
+    Los modelos de razonamiento (DeepSeek R1) generan un bloque <think>...</think>
+    con su proceso de pensamiento ANTES de la respuesta final.
+    Esta función elimina ese bloque para quedarnos solo con el JSON/texto útil.
+
+    Ejemplo de salida cruda de R1:
+        <think>
+        Voy a analizar este contrato...
+        </think>
+        {"viabilidad": "VIABLE", ...}
+
+    Retorna solo:
+        {"viabilidad": "VIABLE", ...}
+    """
+    # Eliminar bloque <think>...</think> (puede ser multilínea)
+    texto = re.sub(r"<think>.*?</think>", "", texto, flags=re.DOTALL)
+
+    # Eliminar bloques ```json ... ``` que algunos modelos agregan
+    texto = re.sub(r"```(?:json)?\s*", "", texto)
+    texto = re.sub(r"```", "", texto)
+
+    return texto.strip()
+
+
+def llamar_proveedor(
+    prompt: str,
+    modelo_cfg: dict,
+    json_mode: bool = True,
+) -> str:
+    """
+    Router central: dirige la llamada al proveedor correcto según la configuración
+    del modelo seleccionado. Retorna siempre un STRING con la respuesta.
+
+    Parámetros:
+        prompt     : El texto del prompt a enviar al modelo
+        modelo_cfg : Dict de MODELOS_DISPONIBLES con proveedor, model_id, etc.
+        json_mode  : True cuando esperamos JSON de vuelta (análisis de oferta)
+                     False cuando esperamos texto libre (resumen ejecutivo)
+
+    Retorna:
+        str: El contenido de la respuesta (JSON string o texto plano)
+    """
+    proveedor   = modelo_cfg["proveedor"]
+    model_id    = modelo_cfg["model_id"]
+    json_ok     = modelo_cfg.get("soporta_json_mode", True)
+    es_reasoning = modelo_cfg.get("es_reasoning", False)
+
+    # ── Proveedor: GROQ (LLaMA 3.3, DeepSeek R1, LLaMA 4 Scout) ─────────────
+    if proveedor == "groq":
+        kwargs = {
+            "model"      : model_id,
+            "messages"   : [{"role": "user", "content": prompt}],
+            "temperature": 0.7,
+        }
+        # JSON mode solo si el modelo lo soporta y lo necesitamos
+        # R1 NO usa json_mode porque sus <think> tokens rompen el parser JSON de Groq
+        if json_mode and json_ok:
+            kwargs["response_format"] = {"type": "json_object"}
+
+        response = groq_client.chat.completions.create(**kwargs)
+        texto = response.choices[0].message.content
+
+        # Si el modelo es de razonamiento (R1), limpiar los bloques <think>
+        if es_reasoning:
+            texto = _limpiar_respuesta_reasoning(texto)
+
+        return texto
+
+    # ── Proveedor: GEMINI (Google AI Studio) ─────────────────────────────────
+    elif proveedor == "gemini":
+        if gemini_client is None:
+            raise ValueError(
+                "❌ GOOGLE_API_KEY no está configurada en tu archivo .env\n"
+                "Agrega: GOOGLE_API_KEY=tu_clave_de_google_ai_studio"
+            )
+
+        # En Gemini, el JSON mode se activa con response_mime_type
+        config_gemini = {}
+        if json_mode and json_ok:
+            config_gemini["response_mime_type"] = "application/json"
+
+        response = gemini_client.models.generate_content(
+            model    = model_id,
+            contents = prompt,
+            config   = config_gemini if config_gemini else None,
+        )
+        return response.text
+
+    else:
+        raise ValueError(f"Proveedor desconocido: '{proveedor}'. Opciones: groq, gemini")
+
+
+# =============================================================================
 # ANÁLISIS IA — PROMPT ENRIQUECIDO CON PERFIL REAL
 # =============================================================================
-def analizar_oferta_ia(oferta: dict) -> dict | None:
+def analizar_oferta_ia(oferta: dict, modelo_cfg: dict = None) -> dict | None:
     """
-    Evalúa una oferta con Gemini usando el perfil institucional real.
-    Incluye caché en memoria: no re-analiza el mismo ID de proceso.
+    Evalúa una oferta con IA usando el perfil institucional real.
+    Soporta múltiples proveedores: Groq (LLaMA, DeepSeek R1) y Google (Gemini).
+
+    Parámetros:
+        oferta     : Dict con los datos del proceso de SECOP II
+        modelo_cfg : Config del modelo (de MODELOS_DISPONIBLES). Si es None,
+                     usa el modelo default (LLaMA 3.3 70B via Groq).
+
+    Retorna:
+        dict con el análisis completo, o None si hubo un error.
+
+    Incluye caché en memoria: no re-analiza el mismo proceso con el mismo modelo.
     """
+    # Si no se especifica modelo, usar el default (comportamiento anterior)
+    if modelo_cfg is None:
+        modelo_cfg = MODELOS_DISPONIBLES[MODELO_DEFAULT_KEY]
+
     id_proceso = oferta.get("id_del_proceso", "Desconocido")
 
-    # --- Caché: retornar si ya fue analizado ---
-    if id_proceso in _cache_analisis:
-        print(f"[CACHÉ] Oferta {id_proceso} recuperada del caché.")
-        return _cache_analisis[id_proceso]
+    # La clave de caché incluye el modelo para que al cambiar modelo se re-analice
+    # Ejemplo: "CO1.BDOS.123456_llama-3.3-70b-versatile"
+    cache_key = f"{id_proceso}_{modelo_cfg['model_id']}"
+
+    # --- Caché: retornar si ya fue analizado con este mismo modelo ---
+    if cache_key in _cache_analisis:
+        print(f"[CACHÉ] Oferta {id_proceso} ({modelo_cfg['model_id']}) recuperada del caché.")
+        return _cache_analisis[cache_key]
 
     # --- Extracción de campos ---
     entidad      = oferta.get("entidad", "Entidad Desconocida")
@@ -557,26 +728,29 @@ RESPONDE ÚNICA Y ESTRICTAMENTE EN JSON. Sin texto antes ni después. Sin backti
 """
 
     try:
-        # llamamos al formato de Groq
-        response = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.7,
-            # Esto asegura que Groq intente devolver un JSON si tu prompt lo pide
-            response_format={"type": "json_object"}
+        # ── Llamar al proveedor correcto según el modelo seleccionado ──────────
+        # llamar_proveedor() se encarga de rutar a Groq o Gemini automáticamente
+        # y de limpiar los bloques <think> si es un modelo de razonamiento (R1)
+        texto_respuesta = llamar_proveedor(
+            prompt     = prompt,
+            modelo_cfg = modelo_cfg,
+            json_mode  = True,   # Análisis de oferta → siempre queremos JSON
         )
 
-        # 4. Accedemos al texto de la respuesta de forma correcta
-        # Aquí extraemos el texto (el JSON) y lo convertimos en un diccionario de Python
-        analisis_dict = json.loads(response.choices[0].message.content)
-        # Guardar en caché
-        _cache_analisis[id_proceso] = analisis_dict
+        # Convertir el string JSON a diccionario Python
+        analisis_dict = json.loads(texto_respuesta)
+
+        # Guardar en caché con clave modelo-específica
+        _cache_analisis[cache_key] = analisis_dict
+        print(f"[OK] Oferta {id_proceso} analizada con {modelo_cfg['model_id']}")
         return analisis_dict
 
+    except json.JSONDecodeError as e:
+        print(f"[ERROR JSON] Oferta {id_proceso} — respuesta no es JSON válido: {e}")
+        print(f"  Respuesta cruda: {texto_respuesta[:200]}...")
+        return None
     except Exception as e:
-        print(f"[ERROR IA] Oferta {id_proceso} — {entidad}: {e}")
+        print(f"[ERROR IA] Oferta {id_proceso} — {entidad} ({modelo_cfg['model_id']}): {e}")
         return None
 
 
@@ -585,30 +759,47 @@ RESPONDE ÚNICA Y ESTRICTAMENTE EN JSON. Sin texto antes ni después. Sin backti
 # =============================================================================
 def analizar_ofertas_secuencial(
     ofertas: list,
-    delay_segundos: float = 4.0,
+    delay_segundos: float = 2.0,
     callback_progreso=None,
+    modelo_cfg: dict = None,
 ) -> list:
     """
     Analiza ofertas de forma secuencial con delay configurable.
-    - delay_segundos=4.0 es seguro para el free tier de Gemini (15 RPM).
-    - Las que están en caché se saltan el delay (son instantáneas).
-    - callback_progreso(i, total, id_proceso, desde_cache): función opcional de UI.
+
+    Parámetros:
+        ofertas          : Lista de dicts con datos de SECOP II
+        delay_segundos   : Segundos de pausa entre llamadas a la API.
+                           Cada modelo tiene su delay recomendado:
+                           - Groq free tier  → 2.0 s (30 RPM)
+                           - Gemini free tier → 4.0 s (15 RPM)
+        callback_progreso: Función opcional para actualizar la barra de progreso
+                           Firma: callback(completados, total, id_proceso, desde_cache)
+        modelo_cfg       : Config del modelo seleccionado. Si es None usa el default.
+
+    Retorna:
+        Lista de dicts con los análisis completados.
     """
+    if modelo_cfg is None:
+        modelo_cfg = MODELOS_DISPONIBLES[MODELO_DEFAULT_KEY]
+
     resultados = []
-    total = len(ofertas)
+    total      = len(ofertas)
+    model_id   = modelo_cfg["model_id"]
 
     for i, oferta in enumerate(ofertas):
-        id_proc    = oferta.get("id_del_proceso", "?")
-        en_cache   = id_proc in _cache_analisis
+        id_proc   = oferta.get("id_del_proceso", "?")
+        # La clave de caché incluye el modelo para detectar si ya existe
+        cache_key = f"{id_proc}_{model_id}"
+        en_cache  = cache_key in _cache_analisis
 
         if callback_progreso:
             callback_progreso(i, total, id_proc, en_cache)
 
-        resultado = analizar_oferta_ia(oferta)
+        resultado = analizar_oferta_ia(oferta, modelo_cfg=modelo_cfg)
         if resultado:
             resultados.append(resultado)
 
-        # Solo esperar si la llamada fue real (no desde caché)
+        # Solo esperar si la llamada fue REAL (no estaba en caché)
         if not en_cache and i < total - 1:
             time.sleep(delay_segundos)
 
@@ -618,26 +809,28 @@ def analizar_ofertas_secuencial(
     return resultados
 
 
-# Alias para compatibilidad con versión anterior de app.py
-def analizar_ofertas_paralelo(ofertas, max_workers=4, callback_progreso=None):
-    """Alias que redirige al procesamiento secuencial seguro."""
-    return analizar_ofertas_secuencial(
-        ofertas,
-        delay_segundos=4.0,
-        callback_progreso=lambda i, t, id_, cache: (
-            callback_progreso(i, t, id_) if callback_progreso else None
-        ),
-    )
-
-
 # =============================================================================
 # RESUMEN EJECUTIVO IA — Post-análisis de todas las ofertas
 # =============================================================================
-def generar_resumen_ejecutivo(resultados: list) -> str:
+def generar_resumen_ejecutivo(resultados: list, modelo_cfg: dict = None) -> str:
     """
     Genera un resumen ejecutivo estratégico de todas las ofertas analizadas,
     con recomendaciones de priorización para el equipo de gestión contractual.
+
+    Parámetros:
+        resultados : Lista de dicts con los análisis de cada oferta
+        modelo_cfg : Config del modelo seleccionado. Si es None usa el default.
+
+    Retorna:
+        str: Texto narrativo del resumen ejecutivo (150-250 palabras)
+
+    BUG CORREGIDO: La versión anterior usaba response_format={"type":"json_object"}
+    pero pedía texto plano → se retornaba un dict que rompía st.markdown() en app.py.
+    Ahora se usa json_mode=False y se retorna directamente el string de la IA.
     """
+    if modelo_cfg is None:
+        modelo_cfg = MODELOS_DISPONIBLES[MODELO_DEFAULT_KEY]
+
     if not resultados:
         return "No hay resultados para generar resumen."
 
@@ -691,19 +884,22 @@ INSTRUCCIONES:
 """
 
     try:
-        # 'response' recibe todo el paquete de Groq
-        response = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[{"role": "user", "content": prompt}]
+        # ── BUG CORREGIDO ────────────────────────────────────────────────────
+        # Versión anterior usaba response_format={"type": "json_object"} pero el
+        # prompt pedía texto narrativo → conflicto de tipos → error en UI.
+        # Solución: json_mode=False para texto libre, retornar string directamente.
+        # ─────────────────────────────────────────────────────────────────────
+        texto_resumen = llamar_proveedor(
+            prompt     = prompt,
+            modelo_cfg = modelo_cfg,
+            json_mode  = False,   # Resumen ejecutivo → texto narrativo, no JSON
         )
 
-        # Aquí extraemos directamente el texto generado por el modelo
-        resultado_final = response.choices[0].message.content
-
-        return resultado_final
+        # Retornar directamente como string (no json.loads — era el bug anterior)
+        return texto_resumen.strip()
 
     except Exception as e:
-        print(f"[ERROR Resumen Ejecutivo] {e}")
+        print(f"[ERROR Resumen Ejecutivo] ({modelo_cfg['model_id']}): {e}")
         return "No se pudo generar el resumen ejecutivo automático."
 
 

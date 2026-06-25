@@ -177,11 +177,10 @@ for key, default in [
 # =============================================================================
 # ESTADO EN LÍNEA
 # =============================================================================
-st.markdown("""
-<div class="status-pill">
-    <span class="status-dot"></span> En línea · IA SECOP II Activo &nbsp;👤
-</div>
-""", unsafe_allow_html=True)
+# El status pill se renderiza DESPUÉS de que el sidebar defina modelo_cfg_activo
+# Streamlit ejecuta el script de arriba a abajo, así que colocamos el status
+# pill dinámico luego de la sección del sidebar (ver más abajo en el código)
+_STATUS_PILL_PLACEHOLDER = st.empty()  # Se llena después de leer modelo_cfg_activo
 
 
 # =============================================================================
@@ -245,27 +244,86 @@ limite_resultados = st.sidebar.number_input(
     "Máximo de ofertas a analizar:", min_value=1, max_value=50, value=10, step=1
 )
 
-# Tiempo estimado teniendo en cuenta delay de 4s para API gratuita
+# Tiempo estimado dinámico — se calcula DESPUÉS de definir modelo_cfg_activo
+# Por eso usamos un placeholder que se actualizará en la sección de IA
+# (el sidebar se renderiza de arriba a abajo, delay_recomendado se define luego)
+# Usamos valor conservador aquí; el caption real está en la sección de IA
 tiempo_est_seg = int(limite_resultados) * 4
 st.sidebar.caption(
-    f"⏱️ Tiempo estimado: **~{tiempo_est_seg}–{tiempo_est_seg + 10} seg** "
-    f"para {int(limite_resultados)} oferta(s) con API gratuita (4 s/llamada). "
+    f"⏱️ El tiempo exacto depende del modelo seleccionado. "
+    f"~{int(limite_resultados) * 2}–{int(limite_resultados) * 4} seg aprox. "
     "♻️ Las que ya están en caché se saltan el delay."
 )
 
 st.sidebar.divider()
 
-# --- Modo API ---
+# --- Selector de modelo IA ---
 st.sidebar.markdown("#### ⚙️ Configuración de IA")
+
+# Importar el catálogo de modelos desde el backend
+opciones_modelo = list(backend_ia.MODELOS_DISPONIBLES.keys())
+
+modelo_seleccionado_key = st.sidebar.selectbox(
+    "🤖 Modelo de IA:",
+    options=opciones_modelo,
+    index=0,   # LLaMA 3.3 70B por defecto (el que ya usabas)
+    help="Selecciona el modelo que analizará las ofertas de SECOP II.",
+)
+
+# Obtener la configuración completa del modelo seleccionado
+modelo_cfg_activo = backend_ia.MODELOS_DISPONIBLES[modelo_seleccionado_key]
+
+# Mostrar descripción y características del modelo activo
+st.sidebar.caption(f"📝 {modelo_cfg_activo['descripcion']}")
+
+# Indicadores de proveedor y capacidades
+proveedor_label = "☁️ Google AI Studio" if modelo_cfg_activo["proveedor"] == "gemini" else "⚡ Groq LPU"
+json_label      = "✅ JSON nativo" if modelo_cfg_activo["soporta_json_mode"] else "🔧 Post-procesado"
+reason_label    = "🧠 Razonamiento" if modelo_cfg_activo["es_reasoning"] else ""
+
+st.sidebar.markdown(
+    f"`{proveedor_label}` &nbsp; `{json_label}` &nbsp; `{reason_label}`" if reason_label
+    else f"`{proveedor_label}` &nbsp; `{json_label}`",
+    unsafe_allow_html=True,
+)
+
+# Aviso si se selecciona Gemini y no hay clave configurada
+if modelo_cfg_activo["proveedor"] == "gemini" and not backend_ia.GOOGLE_API_KEY:
+    st.sidebar.warning(
+        "⚠️ **GOOGLE_API_KEY** no detectada.\n\n"
+        "Agrega en tu `.env`:\n`GOOGLE_API_KEY=tu_clave`\n\n"
+        "Obtén tu clave gratis en [aistudio.google.com](https://aistudio.google.com)"
+    )
+
+# Aviso informativo para DeepSeek R1
+if modelo_cfg_activo["es_reasoning"]:
+    st.sidebar.info(
+        "🧠 **Modelo de razonamiento**: genera un proceso de pensamiento interno "
+        "antes de responder. Es más lento pero más reflexivo. "
+        "Los bloques `<think>` se limpian automáticamente."
+    )
+
+st.sidebar.markdown("<br>", unsafe_allow_html=True)
+
+# Delay adaptativo: usa el recomendado del modelo pero permite ajuste manual
+delay_recomendado = modelo_cfg_activo["delay_recomendado"]
 delay_groq = st.sidebar.slider(
-    "Delay entre llamadas Groq (seg):",
-    min_value=0.0, max_value=4.0, value=2.0, step=0.5,
-    help="Groq gratis: mínimo 2s (30 req/min). En 0 puede dar error 429 si analizas más de 5 ofertas seguidas.",
+    "Delay entre llamadas (seg):",
+    min_value=0.0, max_value=6.0,
+    value=delay_recomendado,   # Se actualiza automáticamente al cambiar modelo
+    step=0.5,
+    help=(
+        "Groq free tier: mínimo 2 s (30 RPM). "
+        "Gemini free tier: mínimo 4 s (15 RPM). "
+        "Con caché activo las repetidas no consumen cuota."
+    ),
 )
-st.sidebar.caption(
-    "🆓 **Free tier**: 30 solicitudes/minuto → usa 2–3 s\n"
-    "💳 **Paid tier**: puedes bajar a 0 s"
-)
+
+# Caption dinámico según proveedor
+if modelo_cfg_activo["proveedor"] == "groq":
+    st.sidebar.caption("🆓 **Groq free**: 30 req/min · 1.000 req/día → usa ≥ 2 s")
+else:
+    st.sidebar.caption("🆓 **Gemini free**: 15 req/min · 1.500 req/día → usa ≥ 4 s")
 
 st.sidebar.divider()
 
@@ -296,6 +354,21 @@ if st.sidebar.button("🗑️ Limpiar caché", use_container_width=True):
     st.rerun()
 
 st.sidebar.divider()
+
+
+# =============================================================================
+# STATUS PILL DINÁMICO (se renderiza aquí, después de conocer modelo_cfg_activo)
+# =============================================================================
+modelo_nombre_corto = modelo_seleccionado_key.split("—")[0].strip()  # "🦙 LLaMA 3.3 70B"
+_STATUS_PILL_PLACEHOLDER.markdown(
+    f"""
+<div class="status-pill">
+    <span class="status-dot"></span>
+    En línea · {modelo_nombre_corto} activo &nbsp;👤
+</div>
+""",
+    unsafe_allow_html=True,
+)
 
 
 # =============================================================================
@@ -375,48 +448,60 @@ with tab_analisis:
                 "- Amplía las categorías UNSPSC o deja la palabra clave vacía."
             )
         else:
-            total = len(ofertas_filtradas)
-            en_cache  = sum(1 for o in ofertas_filtradas
-                            if o.get("id_del_proceso") in backend_ia._cache_analisis)
+            # La clave de caché ahora incluye el modelo — calcular correctamente
+            model_id_activo = modelo_cfg_activo["model_id"]
+            total     = len(ofertas_filtradas)
+            en_cache  = sum(
+                1 for o in ofertas_filtradas
+                if f"{o.get('id_del_proceso')}_{model_id_activo}" in backend_ia._cache_analisis
+            )
             a_analizar = total - en_cache
             tiempo_est = a_analizar * delay_groq
 
             st.info(
-                f"✅ **{total} oferta(s)** pasaron el pre-filtro. "
+                f"✅ **{total} oferta(s)** pasaron el pre-filtro — "
+                f"usando **{modelo_seleccionado_key}**\n\n"
                 f"♻️ **{en_cache}** en caché · 🧠 **{a_analizar}** nuevas "
-                f"(tiempo estimado: ~{int(tiempo_est)}–{int(tiempo_est) + 10} seg con API gratuita)."
+                f"(tiempo estimado: ~{int(tiempo_est)}–{int(tiempo_est) + 10} seg)"
             )
 
-            barra      = st.progress(0, text="Iniciando análisis con Groq...")
+            # Texto dinámico en la barra de progreso según proveedor
+            proveedor_txt = "Google Gemini" if modelo_cfg_activo["proveedor"] == "gemini" else "Groq"
+            barra      = st.progress(0, text=f"Iniciando análisis con {proveedor_txt}...")
             status_txt = st.empty()
 
             def actualizar_progreso(completados, total_t, id_proc, desde_cache):
-                pct = completados / total_t if total_t > 0 else 0
-                origen = "⚡ caché" if desde_cache else "🧠 IA Groq"
-                msg = f"[{completados}/{total_t}] {origen} → {id_proc}"
+                pct    = completados / total_t if total_t > 0 else 0
+                origen = "⚡ caché" if desde_cache else f"🧠 {proveedor_txt}"
+                msg    = f"[{completados}/{total_t}] {origen} → {id_proc}"
                 barra.progress(pct, text=msg)
                 status_txt.caption(msg)
 
+            # ── Llamada al backend con el modelo seleccionado ─────────────────
+            # modelo_cfg_activo se pasa para que use Groq, Gemini, etc.
             resultados_nuevos = backend_ia.analizar_ofertas_secuencial(
-                ofertas=ofertas_filtradas,
-                delay_segundos=float(delay_groq),
-                callback_progreso=actualizar_progreso,
+                ofertas           = ofertas_filtradas,
+                delay_segundos    = float(delay_groq),
+                callback_progreso = actualizar_progreso,
+                modelo_cfg        = modelo_cfg_activo,   # ← NUEVO: modelo seleccionado
             )
 
             st.session_state.resultados_analisis = resultados_nuevos
-            st.session_state.ultimo_analisis = datetime.now().strftime("%Y-%m-%d %H:%M")
+            st.session_state.ultimo_analisis     = datetime.now().strftime("%Y-%m-%d %H:%M")
             barra.empty()
             status_txt.empty()
             st.success(
-                f"🎉 Análisis completado — **{len(resultados_nuevos)} oferta(s) evaluadas**. "
+                f"🎉 Análisis completado con **{modelo_seleccionado_key}** — "
+                f"**{len(resultados_nuevos)} oferta(s) evaluadas**. "
                 f"💾 Guardadas en caché para el resto de la sesión."
             )
 
-            # Resumen ejecutivo IA
+            # Resumen ejecutivo IA — también usa el modelo seleccionado
             if len(resultados_nuevos) >= 2:
-                with st.spinner("Generando resumen ejecutivo estratégico..."):
+                with st.spinner(f"Generando resumen ejecutivo con {modelo_nombre_corto}..."):
                     st.session_state.resumen_ejecutivo = backend_ia.generar_resumen_ejecutivo(
-                        resultados_nuevos
+                        resultados_nuevos,
+                        modelo_cfg = modelo_cfg_activo,   # ← NUEVO: mismo modelo
                     )
 
     # --- SECCIÓN DE RESULTADOS ---
