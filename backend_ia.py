@@ -1,75 +1,104 @@
 # =============================================================================
 # backend_ia.py — Motor de análisis SECOP II con IA
-# Versión 3.0 — Multi-modelo · Perfil real · Caché · Rate-limit seguro
-# Modelos: LLaMA 3.3 70B · DeepSeek R1 · Gemini 2.5 Flash · LLaMA 4 Scout
+# Versión 4.0 — Multi-modelo · Perfil real · Caché · Rate-limit seguro
+# Mejoras: retry con backoff, logging robusto, validación de respuestas,
+# Tipado completo, constantes centralizadas, manejo de errores mejorado
 # =============================================================================
-from google import genai                  # SDK de Google para Gemini
-from sodapy import Socrata
-from dotenv import load_dotenv
-import os
-import re                                  # Para limpiar bloques <think> de R1
-import json
-import pandas as pd
+from __future__ import annotations
+
 import io
+import json
+import logging
+import os
+import re
 import time
-from groq import Groq
 from datetime import datetime, timedelta
+from typing import Any, Callable
 
-# --- Carga de variables de entorno ---
+import pandas as pd
+from dotenv import load_dotenv
+from google import genai
+from groq import Groq
+from sodapy import Socrata
+
+# =============================================================================
+# CONFIGURACIÓN DE LOGGING
+# =============================================================================
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger("secop_ia")
+
+# =============================================================================
+# VARIABLES DE ENTORNO
+# =============================================================================
 load_dotenv()
-GROQ_API_KEY   = os.environ.get("GROQ_API_KEY")   # Groq: LLaMA 3.3, R1, LLaMA 4
-GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")  # Google AI Studio: Gemini
-TOKEN          = os.environ.get("TOKEN")            # Socrata SECOP II
 
-# --- Cliente Groq (LLaMA y DeepSeek R1) ---
-groq_client = Groq(api_key=GROQ_API_KEY)
+GROQ_API_KEY:   str | None = os.environ.get("GROQ_API_KEY")
+GOOGLE_API_KEY: str | None = os.environ.get("API_KEY_GEMINI_MIA")
+TOKEN:          str | None = os.environ.get("TOKEN")  # Socrata SECOP II
 
-# --- Cliente Gemini (Google AI Studio) ---
-# Se inicializa solo si la clave está disponible para no crashear si no existe
-gemini_client = None
+# =============================================================================
+# CONSTANTES DE CONFIGURACIÓN
+# =============================================================================
+DATASET_ID        = "p6dx-8zbt"
+DIAS_HISTORICO    = 90     # Ventana de búsqueda en días
+BUFFER_MULTIPLIER = 10     # Factor de buffer al descargar ofertas
+MAX_BUFFER        = 800    # Máximo de registros descargados por petición
+MAX_RETRY         = 3      # Intentos máximos ante errores de API
+RETRY_BASE_DELAY  = 2.0    # Delay base de backoff exponencial (segundos)
+JSON_PARSE_MAXLEN = 300    # Caracteres de respuesta cruda en logs de error
+
+# =============================================================================
+# INICIALIZACIÓN DE CLIENTES
+# =============================================================================
+groq_client: Groq = Groq(api_key=GROQ_API_KEY)
+
+gemini_client: genai.Client | None = None
 if GOOGLE_API_KEY:
     try:
         gemini_client = genai.Client(api_key=GOOGLE_API_KEY)
-    except Exception as e:
-        print(f"[AVISO] No se pudo inicializar Gemini: {e}")
+        logger.info("Cliente Gemini inicializado correctamente.")
+    except Exception as exc:
+        logger.warning("No se pudo inicializar Gemini: %s", exc)
 
-# --- Cliente Socrata (datos.gov.co — SECOP II) ---
-socrata_client = Socrata("www.datos.gov.co", TOKEN)
+socrata_client: Socrata = Socrata("www.datos.gov.co", TOKEN)
 
-# --- Caché en memoria: evita re-analizar el mismo proceso en la misma sesión ---
-# Clave: id_del_proceso | Valor: dict con el análisis completo
-# Se incluye el modelo usado para que al cambiar modelo se re-analice
+# =============================================================================
+# CACHÉ EN MEMORIA
+# Clave: "{id_proceso}_{model_id}" → re-analiza al cambiar de modelo
+# =============================================================================
 _cache_analisis: dict[str, dict] = {}
 
-
 # =============================================================================
-# CONFIGURACIÓN DE MODELOS DISPONIBLES
-# Cada entrada define: proveedor, model_id, descripción y características
+# CATÁLOGO DE MODELOS DISPONIBLES
 # =============================================================================
-MODELOS_DISPONIBLES = {
+MODELOS_DISPONIBLES: dict[str, dict[str, Any]] = {
     "🦙 LLaMA 3.3 70B — Groq": {
         "proveedor"        : "groq",
         "model_id"         : "llama-3.3-70b-versatile",
-        "descripcion"      : "Tu modelo base actual. Rápido, equilibrado y gratuito.",
-        "soporta_json_mode": True,    # Groq devuelve JSON limpio con esta bandera
-        "es_reasoning"     : False,   # No genera bloques <think>
-        "delay_recomendado": 2.0,     # Segundos entre llamadas en free tier
-    },
-    "🤖 DeepSeek R1 — Groq": {
-        "proveedor"        : "groq",
-        "model_id"         : "deepseek-r1-distill-llama-70b",
-        "descripcion"      : "Razonamiento profundo paso a paso. Más reflexivo.",
-        "soporta_json_mode": False,   # R1 genera <think>...</think> antes del JSON
-        "es_reasoning"     : True,    # ← Le decimos que limpie los bloques <think>
+        "descripcion"      : "Modelo base. Rápido, equilibrado y gratuito vía Groq.",
+        "soporta_json_mode": True,
+        "es_reasoning"     : False,
         "delay_recomendado": 2.0,
     },
-    "✨ Gemini 2.5 Flash — Google": {
+    "🐋 DeepSeek R1 — Groq": {
+        "proveedor"        : "groq",
+        "model_id"         : "deepseek-r1-distill-llama-70b",
+        "descripcion"      : "Razonamiento profundo paso a paso. Más reflexivo pero lento.",
+        "soporta_json_mode": False,  # Sus <think> tokens rompen el parser JSON de Groq
+        "es_reasoning"     : True,
+        "delay_recomendado": 2.0,
+    },
+    "❇️ Gemini 2.5 Flash — Google": {
         "proveedor"        : "gemini",
         "model_id"         : "gemini-2.5-flash",
-        "descripcion"      : "Reemplaza a 2.0 Flash (deprecado jun/2026). Gratis, 1M tokens.",
-        "soporta_json_mode": True,    # Gemini soporta response_mime_type=application/json
+        "descripcion"      : "Modelo multimodal equilibrado entre velocidad, razonamiento y costo",
+        "soporta_json_mode": True,
         "es_reasoning"     : False,
-        "delay_recomendado": 4.0,     # Google free tier: 15 RPM → más conservador
+        "delay_recomendado": 4.0,  # Free tier: 15 RPM → más conservador
     },
     "🦙 LLaMA 4 Scout — Groq": {
         "proveedor"        : "groq",
@@ -81,12 +110,10 @@ MODELOS_DISPONIBLES = {
     },
 }
 
-# Modelo que se usa por defecto (el mismo que tenías antes)
 MODELO_DEFAULT_KEY = "🦙 LLaMA 3.3 70B — Groq"
 
-
 # =============================================================================
-# PERFIL INSTITUCIONAL REAL ANONIMIZADO
+# PERFIL INSTITUCIONAL
 # Basado en documentos institucionales y RUP (corte 31/12/2024)
 # =============================================================================
 PERFIL_UNIVERSIDAD = """
@@ -181,9 +208,9 @@ PERFIL_UNIVERSIDAD = """
 """
 
 # =============================================================================
-# CATÁLOGO UNSPSC — PERFIL COMPLETO (2 dígitos = familia)
+# CATÁLOGOS UNSPSC
 # =============================================================================
-UNSPSC_PERFIL = {
+UNSPSC_PERFIL: dict[str, str] = {
     "86": "Educación y Formación",
     "80": "Consultoría y Gestión Empresarial",
     "81": "Ingeniería, Investigación y Tecnología",
@@ -198,10 +225,9 @@ UNSPSC_PERFIL = {
     "55": "Publicaciones y Medios",
 }
 
-UNSPSC_PREFIJOS_VALIDOS = list(UNSPSC_PERFIL.keys())
+UNSPSC_PREFIJOS_VALIDOS: list[str] = list(UNSPSC_PERFIL.keys())
 
-# Códigos UNSPSC completos (8 dígitos) con experiencia directa en RUP
-UNSPSC_CODIGOS_EXACTOS = {
+UNSPSC_CODIGOS_EXACTOS: set[str] = {
     "45111800", "60101100", "60105200", "60105300", "60105400", "60105600",
     "80101500", "80101600", "80101700", "80111500", "80141500", "80141600",
     "80141900", "81111500", "81131500", "81161500", "82141500", "84101500",
@@ -210,8 +236,8 @@ UNSPSC_CODIGOS_EXACTOS = {
     "93141600", "93141700", "93142000", "93142100", "94131500",
 }
 
-# Palabras que causan descarte inmediato (fuera de perfil)
-PALABRAS_NEGATIVAS = [
+# Términos que causan descarte inmediato
+PALABRAS_NEGATIVAS: list[str] = [
     "construcci", "paviment", "alcantarill", "acueduct", "vial",
     "suministro de alimento", "dotaci", "aseo y limpieza", "vigilancia y seguridad",
     "transporte de carga", "fabricaci", "manufactura", "obra civil",
@@ -219,8 +245,8 @@ PALABRAS_NEGATIVAS = [
     "excavaci", "demolici", "impermeabiliz", "carpintería",
 ]
 
-# Palabras que confirman alineación con el perfil institucional
-PALABRAS_POSITIVAS = [
+# Términos que confirman alineación con el perfil
+PALABRAS_POSITIVAS: list[str] = [
     "educaci", "formaci", "capacitaci", "consultor", "tecnolog", "software",
     "sistema de informaci", "interventor", "investigaci", "docente", "académic",
     "virtual", "e-learning", "plataforma", "tic", "digital", "curricular",
@@ -233,99 +259,110 @@ PALABRAS_POSITIVAS = [
     "diseño artístic", "contenido", "material educativo",
 ]
 
+# Campos requeridos en la respuesta JSON del análisis
+_CAMPOS_REQUERIDOS_ANALISIS = {
+    "viabilidad", "porcentaje_aplicabilidad", "score_financiero",
+    "nivel_competencia", "fortalezas", "riesgos", "recomendacion",
+}
+
 
 # =============================================================================
-# PRE-FILTRO INTELIGENTE (O(1) — sin IA, sin red)
+# PRE-FILTRO INTELIGENTE (sin IA, sin red — O(n·k))
 # =============================================================================
 def es_oferta_relevante(oferta: dict) -> bool:
     """
-    Descarta ofertas que no tienen sentido para el perfil institucional ANTES
-    de hacer cualquier llamada costosa a la IA.
-    Prioridad: código UNSPSC exacto > prefijo > palabras clave.
-    Retorna True si la oferta merece análisis.
+    Determines whether a given offer is relevant based on its description, category code,
+    and specified conditions such as positive and negative words, exact codes, and valid
+    prefixes.
+
+    :param oferta: A dictionary representing the details of an offer. Expected keys
+        include `descripci_n_del_procedimiento` and `nombre_del_procedimiento`
+        for textual evaluation, and `codigo_principal_de_categoria` for evaluating
+        category-specific relevance.
+    :type oferta: dict
+    :return: True if the offer is deemed relevant based on the specified evaluation criteria,
+        otherwise False.
+    :rtype: bool
     """
-    descripcion    = (oferta.get("descripci_n_del_procedimiento", "") or "").lower()
-    nombre_proceso = (oferta.get("nombre_del_procedimiento", "") or "").lower()
-    texto_completo = descripcion + " " + nombre_proceso
+    texto_completo = " ".join([
+        (oferta.get("descripci_n_del_procedimiento") or "").lower(),
+        (oferta.get("nombre_del_procedimiento") or "").lower(),
+    ])
 
-    # 1) Descarte duro por palabras negativas
-    for neg in PALABRAS_NEGATIVAS:
-        if neg in texto_completo:
-            return False
+    # 1. Descarte duro por palabras negativas
+    if any(neg in texto_completo for neg in PALABRAS_NEGATIVAS):
+        return False
 
-    codigo_unspsc = str(oferta.get("codigo_principal_de_categoria", "") or "").strip()
+    codigo = str(oferta.get("codigo_principal_de_categoria") or "").strip()
 
-    # 2) Coincidencia exacta con código RUP — aprobación inmediata
-    if codigo_unspsc in UNSPSC_CODIGOS_EXACTOS:
+    # 2. Código UNSPSC exacto → aprobación inmediata
+    if codigo in UNSPSC_CODIGOS_EXACTOS:
         return True
 
-    # 3) Coincidencia por prefijo de familia (2 dígitos)
-    if len(codigo_unspsc) >= 2:
-        prefijo = codigo_unspsc[:2]
-        if prefijo in UNSPSC_PREFIJOS_VALIDOS:
-            return True
-        else:
-            # Código no relevante — verificar si el texto tiene palabras positivas
-            return any(p in texto_completo for p in PALABRAS_POSITIVAS)
+    # 3. Prefijo de familia válido → aprobación
+    if len(codigo) >= 2 and codigo[:2] in UNSPSC_PREFIJOS_VALIDOS:
+        return True
 
-    # 4) Sin código UNSPSC — exigir al menos una palabra positiva
+    # 4. Sin código relevante → exigir al menos una palabra positiva
     return any(p in texto_completo for p in PALABRAS_POSITIVAS)
 
 
 # =============================================================================
-# SCORE DE PRIORIDAD (sin IA — solo metadatos)
-# Para pre-ordenar antes de enviar a IA y para UI de urgencia.
+# SCORE DE PRIORIDAD PRE-IA (metadatos únicamente)
 # =============================================================================
 def calcular_score_previo(oferta: dict) -> float:
     """
-    Score compuesto pre-IA (0–100) para priorizar qué ofertas analizar primero.
-    Factores: UNSPSC exacto, palabras clave, urgencia por fecha.
-    """
-    score = 0.0
-    codigo = str(oferta.get("codigo_principal_de_categoria", "") or "").strip()
-    texto  = (
-        (oferta.get("descripci_n_del_procedimiento", "") or "").lower() + " " +
-        (oferta.get("nombre_del_procedimiento", "") or "").lower()
-    )
+    Score compuesto (0–100) para priorizar qué ofertas analizar primero
+    sin consumir llamadas a la IA.
 
-    # Código UNSPSC exacto: +40 puntos
+    Factores:
+        - Código UNSPSC exacto en RUP : +40 pts
+        - Prefijo de familia válido    : +20 pts
+        - Palabras positivas           : hasta +30 pts (3 pts c/u, máx 10 matches)
+        - Urgencia de cierre           : hasta +30 pts
+    """
+    score  = 0.0
+    codigo = str(oferta.get("codigo_principal_de_categoria") or "").strip()
+    texto  = " ".join([
+        (oferta.get("descripci_n_del_procedimiento") or "").lower(),
+        (oferta.get("nombre_del_procedimiento") or "").lower(),
+    ])
+
     if codigo in UNSPSC_CODIGOS_EXACTOS:
         score += 40
     elif len(codigo) >= 2 and codigo[:2] in UNSPSC_PREFIJOS_VALIDOS:
         score += 20
 
-    # Palabras positivas: hasta +30 puntos
     matches = sum(1 for p in PALABRAS_POSITIVAS if p in texto)
-    score += min(matches * 3, 30)
+    score  += min(matches * 3, 30)
 
-    # Urgencia por fecha de cierre: hasta +30 puntos
     fecha_raw = oferta.get("fecha_de_recepcion_de")
     if fecha_raw:
         try:
             fecha_obj = datetime.fromisoformat(str(fecha_raw).split(".")[0])
-            dias = (fecha_obj - datetime.now()).days
-            if 0 <= dias <= 3:
-                score += 30
-            elif 0 <= dias <= 7:
-                score += 20
-            elif 0 <= dias <= 15:
-                score += 10
-        except Exception:
+            dias      = (fecha_obj - datetime.now()).days
+            if   0 <= dias <= 3:  score += 30
+            elif 0 <= dias <= 7:  score += 20
+            elif 0 <= dias <= 15: score += 10
+        except (ValueError, TypeError):
             pass
 
     return round(score, 1)
 
 
 # =============================================================================
-# DIAGNÓSTICO DE CONEXIÓN — Útil para debugging en producción
+# DIAGNÓSTICO DE CONEXIÓN SOCRATA
 # =============================================================================
 def diagnosticar_api() -> dict:
     """
-    Prueba la conectividad con Socrata sin filtros para identificar
-    si el problema es la conexión, el dataset o los filtros WHERE.
-    Retorna un dict con el diagnóstico.
+    Prueba la conectividad con Socrata sin filtros para identificar si el
+    problema es la conexión, el dataset o los filtros WHERE.
+
+    Returns:
+        Dict con claves: conexion_ok, total_sin_filtro, muestra_estados,
+        muestra_ids, error.
     """
-    resultado = {
+    resultado: dict[str, Any] = {
         "conexion_ok"     : False,
         "total_sin_filtro": 0,
         "muestra_estados" : [],
@@ -333,165 +370,153 @@ def diagnosticar_api() -> dict:
         "error"           : None,
     }
     try:
-        # Consulta sin ningún filtro — solo trae 5 registros para ver la estructura
-        muestra = socrata_client.get("p6dx-8zbt", limit=5, order="fecha_de_publicacion_del DESC")
+        muestra = socrata_client.get(
+            DATASET_ID, limit=5, order="fecha_de_publicacion_del DESC"
+        )
         resultado["conexion_ok"]      = True
         resultado["total_sin_filtro"] = len(muestra)
-        # Ver qué valores tiene el campo de estado
-        resultado["muestra_estados"] = list({
+        resultado["muestra_estados"]  = list({
             r.get("estado_de_apertura_del_proceso", "N/A") for r in muestra
         })
-        resultado["muestra_ids"] = [
-            r.get("id_del_proceso", "?") for r in muestra
-        ]
-    except Exception as e:
-        resultado["error"] = str(e)
+        resultado["muestra_ids"] = [r.get("id_del_proceso", "?") for r in muestra]
+        logger.info("Diagnóstico Socrata OK — %d registros de muestra.", len(muestra))
+    except Exception as exc:
+        resultado["error"] = str(exc)
+        logger.error("Diagnóstico Socrata FALLIDO: %s", exc)
     return resultado
 
 
 # =============================================================================
-# OBTENER OFERTAS DEL SECOP II — Versión robusta sin depender del filtro de estado
+# OBTENER OFERTAS DE SECOP II — Estrategia en cascada
 # =============================================================================
 def obtener_ofertas_secop(
     limite: int = 10,
-    palabra_clave: str = None,
-    codigos_unspsc: list = None,
-) -> list:
+    palabra_clave: str | None = None,
+    codigos_unspsc: list[str] | None = None,
+) -> list[dict]:
     """
     Descarga ofertas del SECOP II con estrategia de consulta en cascada:
 
-    Estrategia 1 (óptima): UNSPSC + búsqueda por texto + fecha reciente
-    Estrategia 2 (fallback): Solo UNSPSC + fecha reciente
-    Estrategia 3 (mínima): Solo fecha reciente — pre-filtro local lo depura todo
+    - Estrategia 1 (óptima)  : UNSPSC + texto + fecha reciente
+    - Estrategia 2 (fallback): UNSPSC + fecha reciente
+    - Estrategia 3 (mínima)  : Solo fecha reciente
+    - Estrategia 4 (emergencia): Sin filtros
 
-    El filtro de `estado_de_apertura_del_proceso` se aplica LOCAL porque
-    los valores del campo varían en el dataset real ("Activo", "Publicado", etc.)
-    y una comparación exacta en SoQL puede devolver 0 resultados silenciosamente.
+    El filtro de `estado_de_apertura_del_proceso` se aplica LOCAL porque los
+    valores varían en el dataset real y una comparación exacta en SoQL puede
+    devolver 0 resultados silenciosamente.
+
+    Returns:
+        Lista de dicts con los mejores `limite` procesos, pre-ordenados por score.
     """
-    buffer_descarga = min(limite * 10, 800)
+    buffer = min(limite * BUFFER_MULTIPLIER, MAX_BUFFER)
+    fecha_corte = (datetime.now() - timedelta(days=DIAS_HISTORICO)).strftime(
+        "%Y-%m-%dT00:00:00"
+    )
 
-    # Fecha de corte: solo procesos publicados en los últimos 90 días
-    fecha_corte = (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%dT00:00:00")
-
-    # Construir cláusula UNSPSC si hay filtros específicos
-    like_clauses = None
+    like_clauses: str | None = None
     if codigos_unspsc:
         like_clauses = " OR ".join(
-            [f"codigo_principal_de_categoria LIKE '{c}%'" for c in codigos_unspsc]
+            f"codigo_principal_de_categoria LIKE '{c}%'" for c in codigos_unspsc
         )
 
-    # ── Estrategia 1: UNSPSC + palabra clave + fecha ─────────────────────────
-    params_s1 = {
-        "order": "fecha_de_publicacion_del DESC",
-        "limit": buffer_descarga,
-    }
-    where_s1 = [f"fecha_de_publicacion_del >= '{fecha_corte}'"]
-    if like_clauses:
-        where_s1.append(f"({like_clauses})")
-    params_s1["where"] = " AND ".join(where_s1)
-    if palabra_clave and palabra_clave.strip():
-        params_s1["q"] = palabra_clave.strip()
+    base_where = f"fecha_de_publicacion_del >= '{fecha_corte}'"
+    orden      = "fecha_de_publicacion_del DESC"
 
-    resultados_brutos = []
-    estrategia_usada  = "ninguna"
+    estrategias = [
+        # (descripción, params_extra)
+        ("1 — UNSPSC+fecha+palabra",  {
+            "where": base_where + (f" AND ({like_clauses})" if like_clauses else ""),
+            **( {"q": palabra_clave.strip()} if palabra_clave and palabra_clave.strip() else {} ),
+        }),
+        ("2 — UNSPSC+fecha", {
+            "where": base_where + (f" AND ({like_clauses})" if like_clauses else ""),
+        }),
+        ("3 — solo fecha", {
+            "where": base_where,
+            **( {"q": palabra_clave.strip()} if palabra_clave and palabra_clave.strip() else {} ),
+        }),
+        ("4 — sin filtros", {}),
+    ]
 
-    try:
-        resultados_brutos = socrata_client.get("p6dx-8zbt", **params_s1)
-        estrategia_usada  = "1 (UNSPSC + fecha + palabra)"
-        print(f"[Socrata S1] Descargados: {len(resultados_brutos)}")
-    except Exception as e1:
-        print(f"[Socrata S1 error] {e1}")
+    resultados_brutos: list[dict] = []
+    estrategia_usada = "ninguna"
 
-        # ── Estrategia 2: Solo UNSPSC + fecha ────────────────────────────────
-        params_s2 = {
-            "order": "fecha_de_publicacion_del DESC",
-            "limit": buffer_descarga,
-            "where": f"fecha_de_publicacion_del >= '{fecha_corte}'"
-                     + (f" AND ({like_clauses})" if like_clauses else ""),
-        }
-        try:
-            resultados_brutos = socrata_client.get("p6dx-8zbt", **params_s2)
-            estrategia_usada  = "2 (UNSPSC + fecha)"
-            print(f"[Socrata S2] Descargados: {len(resultados_brutos)}")
-        except Exception as e2:
-            print(f"[Socrata S2 error] {e2}")
-
-            # ── Estrategia 3: Solo fecha reciente ────────────────────────────
-            params_s3 = {
-                "order": "fecha_de_publicacion_del DESC",
-                "limit": buffer_descarga,
-            }
-            if palabra_clave and palabra_clave.strip():
-                params_s3["q"] = palabra_clave.strip()
-            try:
-                resultados_brutos = socrata_client.get("p6dx-8zbt", **params_s3)
-                estrategia_usada  = "3 (solo fecha reciente)"
-                print(f"[Socrata S3] Descargados: {len(resultados_brutos)}")
-            except Exception as e3:
-                print(f"[Socrata S3 error — sin resultados] {e3}")
-                return []
-
-    if not resultados_brutos:
-        # Último recurso: sin ningún filtro
+    for descripcion, params_extra in estrategias:
         try:
             resultados_brutos = socrata_client.get(
-                "p6dx-8zbt",
-                limit=buffer_descarga,
-                order="fecha_de_publicacion_del DESC",
+                DATASET_ID, order=orden, limit=buffer, **params_extra
             )
-            estrategia_usada = "4 (sin filtros — emergencia)"
-            print(f"[Socrata S4] Descargados: {len(resultados_brutos)}")
-        except Exception as e4:
-            print(f"[Socrata S4 fatal] {e4}")
-            return []
+            estrategia_usada = descripcion
+            logger.info("Socrata [%s] — %d registros descargados.", descripcion, len(resultados_brutos))
+            if resultados_brutos:
+                break
+        except Exception as exc:
+            logger.warning("Socrata estrategia %s falló: %s", descripcion, exc)
 
-    # ── Pre-filtro local: palabras negativas/positivas + UNSPSC local ─────────
-    resultados_limpios = [r for r in resultados_brutos if es_oferta_relevante(r)]
+    if not resultados_brutos:
+        logger.error("Todas las estrategias Socrata fallaron. Sin resultados.")
+        return []
 
-    # Ordenar por score previo descendente
-    resultados_ordenados = sorted(
-        resultados_limpios,
-        key=calcular_score_previo,
-        reverse=True,
+    # Pre-filtro local y ordenamiento por score
+    limpios   = [r for r in resultados_brutos if es_oferta_relevante(r)]
+    ordenados = sorted(limpios, key=calcular_score_previo, reverse=True)
+
+    logger.info(
+        "Pipeline Socrata → estrategia: %s | descargados: %d | "
+        "post-filtro: %d | enviando a IA: %d",
+        estrategia_usada, len(resultados_brutos), len(limpios), min(len(ordenados), limite),
     )
-
-    print(
-        f"[INFO] Estrategia: {estrategia_usada} | "
-        f"Descargados: {len(resultados_brutos)} | "
-        f"Pre-filtro local: {len(resultados_limpios)} | "
-        f"Enviando a IA: {min(len(resultados_ordenados), limite)}"
-    )
-
-    return resultados_ordenados[:limite]
+    return ordenados[:limite]
 
 
 # =============================================================================
-# HELPERS DE MULTI-MODELO
+# HELPERS MULTI-MODELO
 # =============================================================================
-
 def _limpiar_respuesta_reasoning(texto: str) -> str:
     """
-    Los modelos de razonamiento (DeepSeek R1) generan un bloque <think>...</think>
-    con su proceso de pensamiento ANTES de la respuesta final.
-    Esta función elimina ese bloque para quedarnos solo con el JSON/texto útil.
+    Los modelos de razonamiento (DeepSeek R1) anteponen un bloque
+    <think>…</think> antes de la respuesta final. Esta función lo elimina.
 
-    Ejemplo de salida cruda de R1:
-        <think>
-        Voy a analizar este contrato...
-        </think>
-        {"viabilidad": "VIABLE", ...}
-
-    Retorna solo:
-        {"viabilidad": "VIABLE", ...}
+    Cubre los casos:
+    - Bloque <think>...</think> completo
+    - Bloque <think> sin cierre (truncado por max_tokens) → elimina desde <think> al final
+    - Bloques ```json … ``` que algunos modelos agregan
     """
-    # Eliminar bloque <think>...</think> (puede ser multilínea)
-    texto = re.sub(r"<think>.*?</think>", "", texto, flags=re.DOTALL)
-
-    # Eliminar bloques ```json ... ``` que algunos modelos agregan
+    # Caso 1: bloque cerrado con </think>
+    texto = re.sub(r"<think>.*?</think>", "", texto, flags=re.DOTALL | re.IGNORECASE)
+    # Caso 2: bloque abierto sin cerrar (DeepSeek truncado por max_tokens)
+    texto = re.sub(r"<think>.*", "", texto, flags=re.DOTALL | re.IGNORECASE)
+    # Eliminar backticks de bloques de codigo
     texto = re.sub(r"```(?:json)?\s*", "", texto)
     texto = re.sub(r"```", "", texto)
-
     return texto.strip()
+
+
+def _extraer_json_de_texto(texto: str) -> str:
+    """
+    Intenta extraer un objeto JSON válido de una cadena que puede tener texto
+    libre alrededor. Útil como fallback cuando json.loads() falla directamente.
+
+    Busca el primer '{' y el último '}' y retorna el fragmento entre ambos.
+    """
+    inicio = texto.find("{")
+    fin    = texto.rfind("}")
+    if inicio != -1 and fin != -1 and fin > inicio:
+        return texto[inicio: fin + 1]
+    return texto
+
+
+def _validar_analisis(datos: dict) -> bool:
+    """
+    Verifica que el dict devuelto por la IA contenga todos los campos mínimos
+    requeridos para renderizarse correctamente en la UI.
+    """
+    faltantes = _CAMPOS_REQUERIDOS_ANALISIS - datos.keys()
+    if faltantes:
+        logger.warning("Análisis IA incompleto — faltan campos: %s", faltantes)
+        return False
+    return True
 
 
 def llamar_proveedor(
@@ -500,152 +525,178 @@ def llamar_proveedor(
     json_mode: bool = True,
 ) -> str:
     """
-    Router central: dirige la llamada al proveedor correcto según la configuración
-    del modelo seleccionado. Retorna siempre un STRING con la respuesta.
+    Router central con retry y backoff exponencial. Dirige la llamada al
+    proveedor correcto (Groq o Gemini) y retorna siempre un STRING.
 
-    Parámetros:
-        prompt     : El texto del prompt a enviar al modelo
-        modelo_cfg : Dict de MODELOS_DISPONIBLES con proveedor, model_id, etc.
-        json_mode  : True cuando esperamos JSON de vuelta (análisis de oferta)
-                     False cuando esperamos texto libre (resumen ejecutivo)
+    Args:
+        prompt    : Texto del prompt.
+        modelo_cfg: Config del modelo de MODELOS_DISPONIBLES.
+        json_mode : True → análisis de oferta (JSON); False → resumen (texto).
 
-    Retorna:
-        str: El contenido de la respuesta (JSON string o texto plano)
+    Returns:
+        Contenido de la respuesta como string.
+
+    Raises:
+        RuntimeError: Si todos los reintentos fallan.
     """
-    proveedor   = modelo_cfg["proveedor"]
-    model_id    = modelo_cfg["model_id"]
-    json_ok     = modelo_cfg.get("soporta_json_mode", True)
+    proveedor    = modelo_cfg["proveedor"]
+    model_id     = modelo_cfg["model_id"]
+    json_ok      = modelo_cfg.get("soporta_json_mode", True)
     es_reasoning = modelo_cfg.get("es_reasoning", False)
 
-    # ── Proveedor: GROQ (LLaMA 3.3, DeepSeek R1, LLaMA 4 Scout) ─────────────
-    if proveedor == "groq":
-        kwargs = {
-            "model"      : model_id,
-            "messages"   : [{"role": "user", "content": prompt}],
-            "temperature": 0.7,
-        }
-        # JSON mode solo si el modelo lo soporta y lo necesitamos
-        # R1 NO usa json_mode porque sus <think> tokens rompen el parser JSON de Groq
-        if json_mode and json_ok:
-            kwargs["response_format"] = {"type": "json_object"}
+    ultimo_error: Exception | None = None
 
-        response = groq_client.chat.completions.create(**kwargs)
-        texto = response.choices[0].message.content
+    for intento in range(1, MAX_RETRY + 1):
+        try:
+            # ── Groq (LLaMA 3.3, DeepSeek R1, LLaMA 4 Scout) ────────────────
+            if proveedor == "groq":
+                # Los modelos de razonamiento (DeepSeek R1) consumen miles de tokens
+                # en el bloque <think> antes de emitir el JSON final.
+                # Con 2048 se truncan en el razonamiento y nunca llegan al JSON.
+                max_tok = 8192 if es_reasoning else 2048
+                kwargs: dict[str, Any] = {
+                    "model"      : model_id,
+                    "messages"   : [{"role": "user", "content": prompt}],
+                    "temperature": 0.4,   # Más bajo = más determinista para JSON
+                    "max_tokens" : max_tok,
+                }
+                if json_mode and json_ok:
+                    kwargs["response_format"] = {"type": "json_object"}
 
-        # Si el modelo es de razonamiento (R1), limpiar los bloques <think>
-        if es_reasoning:
-            texto = _limpiar_respuesta_reasoning(texto)
+                response = groq_client.chat.completions.create(**kwargs)
+                texto    = response.choices[0].message.content or ""
 
-        return texto
+                if es_reasoning:
+                    texto = _limpiar_respuesta_reasoning(texto)
+                return texto
 
-    # ── Proveedor: GEMINI (Google AI Studio) ─────────────────────────────────
-    elif proveedor == "gemini":
-        if gemini_client is None:
-            raise ValueError(
-                "❌ GOOGLE_API_KEY no está configurada en tu archivo .env\n"
-                "Agrega: GOOGLE_API_KEY=tu_clave_de_google_ai_studio"
+            # ── Gemini (Google AI Studio) ─────────────────────────────────────
+            elif proveedor == "gemini":
+                if gemini_client is None:
+                    raise ValueError(
+                        "GOOGLE_API_KEY no está configurada en .env. "
+                        "Agrega: GOOGLE_API_KEY=tu_clave"
+                    )
+                config_gemini: dict[str, str] = {}
+                if json_mode and json_ok:
+                    config_gemini["response_mime_type"] = "application/json"
+
+                response = gemini_client.models.generate_content(
+                    model    = model_id,
+                    contents = prompt,
+                    config   = config_gemini or None,
+                )
+                return response.text or ""
+
+            else:
+                raise ValueError(f"Proveedor desconocido: '{proveedor}'")
+
+        except Exception as exc:
+            ultimo_error = exc
+            wait = RETRY_BASE_DELAY * (2 ** (intento - 1))
+            logger.warning(
+                "Intento %d/%d fallido para %s — %s. Reintentando en %.1f s.",
+                intento, MAX_RETRY, model_id, exc, wait,
             )
+            if intento < MAX_RETRY:
+                time.sleep(wait)
 
-        # En Gemini, el JSON mode se activa con response_mime_type
-        config_gemini = {}
-        if json_mode and json_ok:
-            config_gemini["response_mime_type"] = "application/json"
-
-        response = gemini_client.models.generate_content(
-            model    = model_id,
-            contents = prompt,
-            config   = config_gemini if config_gemini else None,
-        )
-        return response.text
-
-    else:
-        raise ValueError(f"Proveedor desconocido: '{proveedor}'. Opciones: groq, gemini")
+    raise RuntimeError(
+        f"Todos los {MAX_RETRY} intentos fallaron para {model_id}. "
+        f"Último error: {ultimo_error}"
+    )
 
 
 # =============================================================================
 # ANÁLISIS IA — PROMPT ENRIQUECIDO CON PERFIL REAL
 # =============================================================================
-def analizar_oferta_ia(oferta: dict, modelo_cfg: dict = None) -> dict | None:
+def analizar_oferta_ia(
+    oferta: dict,
+    modelo_cfg: dict | None = None,
+) -> dict | None:
     """
     Evalúa una oferta con IA usando el perfil institucional real.
     Soporta múltiples proveedores: Groq (LLaMA, DeepSeek R1) y Google (Gemini).
 
-    Parámetros:
-        oferta     : Dict con los datos del proceso de SECOP II
-        modelo_cfg : Config del modelo (de MODELOS_DISPONIBLES). Si es None,
-                     usa el modelo default (LLaMA 3.3 70B via Groq).
+    Incluye:
+    - Caché por modelo: no re-analiza el mismo proceso con el mismo modelo
+    - Retry con backoff exponencial ante errores de API
+    - Fallback de extracción JSON (busca primer '{' / último '}')
+    - Validación de campos mínimos requeridos
 
-    Retorna:
-        dict con el análisis completo, o None si hubo un error.
+    Args:
+        oferta     : Dict con los datos del proceso de SECOP II.
+        modelo_cfg : Config del modelo. Si es None usa el modelo default.
 
-    Incluye caché en memoria: no re-analiza el mismo proceso con el mismo modelo.
+    Returns:
+        Dict con el análisis completo, o None si hubo un error irrecuperable.
     """
-    # Si no se especifica modelo, usar el default (comportamiento anterior)
     if modelo_cfg is None:
         modelo_cfg = MODELOS_DISPONIBLES[MODELO_DEFAULT_KEY]
 
     id_proceso = oferta.get("id_del_proceso", "Desconocido")
+    cache_key  = f"{id_proceso}_{modelo_cfg['model_id']}"
 
-    # La clave de caché incluye el modelo para que al cambiar modelo se re-analice
-    # Ejemplo: "CO1.BDOS.123456_llama-3.3-70b-versatile"
-    cache_key = f"{id_proceso}_{modelo_cfg['model_id']}"
-
-    # --- Caché: retornar si ya fue analizado con este mismo modelo ---
     if cache_key in _cache_analisis:
-        print(f"[CACHÉ] Oferta {id_proceso} ({modelo_cfg['model_id']}) recuperada del caché.")
+        logger.debug("CACHÉ hit → %s (%s)", id_proceso, modelo_cfg["model_id"])
         return _cache_analisis[cache_key]
 
-    # --- Extracción de campos ---
-    entidad      = oferta.get("entidad", "Entidad Desconocida")
-    nombre_proc  = oferta.get("nombre_del_procedimiento", "Sin nombre")
-    descripcion  = oferta.get("descripci_n_del_procedimiento", "Sin descripción")
-    cuantia      = oferta.get("precio_base", "No especificado")
+    # ── Extracción y normalización de campos ─────────────────────────────────
+    entidad      = oferta.get("entidad") or "Entidad Desconocida"
+    nombre_proc  = oferta.get("nombre_del_procedimiento") or "Sin nombre"
+    descripcion  = oferta.get("descripci_n_del_procedimiento") or "Sin descripción"
+    modalidad    = oferta.get("modalidad_de_contratacion") or "No especificada"
+    tipo_contrato= oferta.get("tipo_de_contrato") or "No especificado"
+    unspsc       = str(oferta.get("codigo_principal_de_categoria") or "").strip() or "No especificado"
+    cats_adicionales = oferta.get("categorias_adicionales") or ""
+    ciudad       = oferta.get("ciudad_entidad") or ""
+    departamento = oferta.get("departamento_entidad") or ""
+    estado_proc  = oferta.get("estado_del_procedimiento") or ""
+    prov_invitados    = oferta.get("proveedores_invitados") or "N/D"
+    respuestas_recib  = oferta.get("respuestas_al_procedimiento") or "N/D"
+    prov_manifestaron = oferta.get("proveedores_que_manifestaron") or "N/D"
+
+    # Cuantía formateada
     try:
-        # Convertirlo a número
-        valor_numerico = float(cuantia)
-        # Formateamos con puntos como separadores de miles
-        cuantia_num = f"{valor_numerico:,.0f}".replace(",", ".")
+        cuantia_num = f"{float(oferta.get('precio_base', 0)):,.0f}".replace(",", ".")
     except (ValueError, TypeError):
-        # Si no es un número (ej: "No especificado"), lo dejamos como está
-        cuantia_num = cuantia
-    modalidad    = oferta.get("modalidad_de_contratacion", "No especificada")
-    tipo_contrato= oferta.get("tipo_de_contrato", "No especificado")
-    unspsc       = oferta.get("codigo_principal_de_categoria", "No especificado")
-    cats_adicionales = oferta.get("categorias_adicionales", "")
-    duracion     = oferta.get("duracion", "")
-    unidad_dur   = oferta.get("unidad_de_duracion", "")
-    ciudad       = oferta.get("ciudad_entidad", "")
-    departamento = oferta.get("departamento_entidad", "")
-    estado_proc  = oferta.get("estado_del_procedimiento", "")
-    prov_invitados     = oferta.get("proveedores_invitados", "N/D")
-    respuestas_recib   = oferta.get("respuestas_al_procedimiento", "N/D")
-    prov_manifestaron  = oferta.get("proveedores_que_manifestaron", "N/D")
+        cuantia_num = str(oferta.get("precio_base") or "No especificado")
 
+    # Duración
+    duracion    = oferta.get("duracion") or ""
+    unidad_dur  = oferta.get("unidad_de_duracion") or ""
+    duracion_texto = f"{duracion} {unidad_dur}".strip() or "No especificada"
+
+    # Enlace
     url_info = oferta.get("urlproceso", {})
-    enlace   = url_info.get("url", "Sin enlace") if isinstance(url_info, dict) else (url_info or "Sin enlace")
+    enlace   = (
+        url_info.get("url", "Sin enlace")
+        if isinstance(url_info, dict)
+        else (url_info or "Sin enlace")
+    )
 
-    fecha_cierre_raw = oferta.get("fecha_de_recepcion_de")
-    if fecha_cierre_raw:
+    # Fecha de cierre
+    fecha_raw = oferta.get("fecha_de_recepcion_de")
+    if fecha_raw:
         try:
-            fecha_obj    = datetime.fromisoformat(str(fecha_cierre_raw).split(".")[0])
+            fecha_obj    = datetime.fromisoformat(str(fecha_raw).split(".")[0])
             fecha_cierre = fecha_obj.strftime("%Y-%m-%d %H:%M")
-        except Exception:
+        except (ValueError, TypeError):
             fecha_cierre = "Fecha inválida"
     else:
         fecha_cierre = "Sin fecha definida"
 
-    duracion_texto = f"{duracion} {unidad_dur}".strip() if duracion else "No especificada"
-
-    # Indicar si el código UNSPSC coincide exactamente con el RUP
-    match_exacto = unspsc in UNSPSC_CODIGOS_EXACTOS
+    # Contexto UNSPSC
+    match_exacto  = unspsc in UNSPSC_CODIGOS_EXACTOS
     match_prefijo = len(unspsc) >= 2 and unspsc[:2] in UNSPSC_PREFIJOS_VALIDOS
-    contexto_unspsc = (
-        "COINCIDENCIA EXACTA CON RUP — experiencia directamente acreditada en este código"
-        if match_exacto else
-        "COINCIDENCIA POR FAMILIA — experiencia relacionada pero no acreditada en este código exacto"
-        if match_prefijo else
-        "SIN COINCIDENCIA DIRECTA EN RUP — evaluar capacidades transferibles"
-    )
+    if match_exacto:
+        contexto_unspsc = "COINCIDENCIA EXACTA CON RUP — experiencia directamente acreditada"
+    elif match_prefijo:
+        contexto_unspsc = "COINCIDENCIA POR FAMILIA — experiencia relacionada pero no exacta"
+    else:
+        contexto_unspsc = "SIN COINCIDENCIA DIRECTA EN RUP — evaluar capacidades transferibles"
+
+    match_exacto_json = "true" if match_exacto else "false"
 
     prompt = f"""
 Eres un analista senior de contratación estatal colombiana con expertise en SECOP II,
@@ -674,7 +725,7 @@ DATOS DEL PROCESO SECOP II
 - Duración                 : {duracion_texto}
 - Código UNSPSC Principal  : {unspsc}
 - Contexto UNSPSC          : {contexto_unspsc}
-- Categorías Adicionales   : {cats_adicionales if cats_adicionales else "Ninguna"}
+- Categorías Adicionales   : {cats_adicionales or "Ninguna"}
 - Estado del Proceso       : {estado_proc}
 
 INTELIGENCIA COMPETITIVA:
@@ -686,7 +737,7 @@ INTELIGENCIA COMPETITIVA:
 INSTRUCCIONES DE ANÁLISIS
 =====================================
 Evalúa con criterio crítico y objetivo:
-1. Alineación del objeto con las capacidades ACREDITADAS EN RUP.
+1. Alineación del objeto con capacidades ACREDITADAS EN RUP.
 2. Viabilidad financiera: ¿el valor es coherente con el tamaño operativo?
    (Liquidez 1.36 y endeudamiento 0.59 — perfil financiero aceptable pero ajustado).
 3. Competencia técnica: ¿tienen experiencia demostrable en >50 contratos para ganar?
@@ -697,7 +748,7 @@ Evalúa con criterio crítico y objetivo:
    el tamaño financiero del proponente (muy bajo = subutilización; muy alto = riesgo).
 
 REGLAS:
-- Si el objeto es de construcción, aseo, vigilancia o manufactura → viabilidad = "NO VIABLE" y porcentaje ≤ 10.
+- Si el objeto es construcción, aseo, vigilancia o manufactura → viabilidad = "NO VIABLE" y porcentaje ≤ 10.
 - Si el código UNSPSC coincide exactamente con el RUP → bonus de +15 puntos en porcentaje.
 - Sé específico. No uses frases genéricas. Cada fortaleza/riesgo debe mencionar
   elementos concretos del proceso evaluado.
@@ -723,72 +774,91 @@ RESPONDE ÚNICA Y ESTRICTAMENTE EN JSON. Sin texto antes ni después. Sin backti
     "modalidad"               : "{modalidad}",
     "fecha_cierre"            : "{fecha_cierre}",
     "enlace_secop"            : "{enlace}",
-    "match_unspsc_rup"        : {"true" if match_exacto else "false"}
+    "match_unspsc_rup"        : {match_exacto_json}
 }}
 """
 
+    texto_respuesta = ""
     try:
-        # ── Llamar al proveedor correcto según el modelo seleccionado ──────────
-        # llamar_proveedor() se encarga de rutar a Groq o Gemini automáticamente
-        # y de limpiar los bloques <think> si es un modelo de razonamiento (R1)
         texto_respuesta = llamar_proveedor(
-            prompt     = prompt,
-            modelo_cfg = modelo_cfg,
-            json_mode  = True,   # Análisis de oferta → siempre queremos JSON
+            prompt=prompt, modelo_cfg=modelo_cfg, json_mode=True,
         )
 
-        # Convertir el string JSON a diccionario Python
-        analisis_dict = json.loads(texto_respuesta)
+        # Para modelos de razonamiento, limpiar bloques <think> antes de parsear
+        # (llamar_proveedor ya lo hace, pero aqui garantizamos doble limpieza)
+        es_reasoning = modelo_cfg.get("es_reasoning", False)
+        if es_reasoning:
+            texto_respuesta = _limpiar_respuesta_reasoning(texto_respuesta)
 
-        # Guardar en caché con clave modelo-específica
+        # Intento 1: parseo directo
+        try:
+            analisis_dict = json.loads(texto_respuesta)
+        except json.JSONDecodeError:
+            # Intento 2: extraer el primer objeto JSON del texto
+            # (texto libre antes/despues del JSON, frecuente en DeepSeek R1)
+            logger.warning(
+                "JSON directo falló para %s — intentando extracción por heurística.", id_proceso
+            )
+            texto_limpio  = _extraer_json_de_texto(texto_respuesta)
+            analisis_dict = json.loads(texto_limpio)
+
+        # Validar campos mínimos
+        if not _validar_analisis(analisis_dict):
+            logger.warning("Análisis de %s descartado por campos incompletos.", id_proceso)
+            return None
+
         _cache_analisis[cache_key] = analisis_dict
-        print(f"[OK] Oferta {id_proceso} analizada con {modelo_cfg['model_id']}")
+        logger.info("OK — %s analizado con %s.", id_proceso, modelo_cfg["model_id"])
         return analisis_dict
 
-    except json.JSONDecodeError as e:
-        print(f"[ERROR JSON] Oferta {id_proceso} — respuesta no es JSON válido: {e}")
-        print(f"  Respuesta cruda: {texto_respuesta[:200]}...")
+    except json.JSONDecodeError as exc:
+        logger.error(
+            "JSON inválido para %s: %s | Respuesta (primeros %d chars): %s",
+            id_proceso, exc, JSON_PARSE_MAXLEN, texto_respuesta[:JSON_PARSE_MAXLEN],
+        )
         return None
-    except Exception as e:
-        print(f"[ERROR IA] Oferta {id_proceso} — {entidad} ({modelo_cfg['model_id']}): {e}")
+    except RuntimeError as exc:
+        # Todos los reintentos agotados
+        logger.error("Sin respuesta IA para %s: %s", id_proceso, exc)
+        return None
+    except Exception as exc:
+        logger.error("Error inesperado en %s (%s): %s", id_proceso, modelo_cfg["model_id"], exc)
         return None
 
 
 # =============================================================================
-# ANÁLISIS SECUENCIAL — Seguro para API gratuita de Gemini
+# ANÁLISIS SECUENCIAL — Seguro para API gratuita
 # =============================================================================
 def analizar_ofertas_secuencial(
-    ofertas: list,
+    ofertas: list[dict],
     delay_segundos: float = 2.0,
-    callback_progreso=None,
-    modelo_cfg: dict = None,
-) -> list:
+    callback_progreso: Callable | None = None,
+    modelo_cfg: dict | None = None,
+) -> list[dict]:
     """
-    Analiza ofertas de forma secuencial con delay configurable.
+    Analiza ofertas de forma secuencial con delay configurable entre llamadas.
 
-    Parámetros:
-        ofertas          : Lista de dicts con datos de SECOP II
-        delay_segundos   : Segundos de pausa entre llamadas a la API.
-                           Cada modelo tiene su delay recomendado:
-                           - Groq free tier  → 2.0 s (30 RPM)
-                           - Gemini free tier → 4.0 s (15 RPM)
-        callback_progreso: Función opcional para actualizar la barra de progreso
-                           Firma: callback(completados, total, id_proceso, desde_cache)
-        modelo_cfg       : Config del modelo seleccionado. Si es None usa el default.
+    - Las ofertas en caché se saltan el delay (no consumen cuota).
+    - El callback de progreso se llama antes de cada análisis y al finalizar.
 
-    Retorna:
-        Lista de dicts con los análisis completados.
+    Args:
+        ofertas          : Lista de dicts con datos de SECOP II.
+        delay_segundos   : Pausa entre llamadas reales (no de caché).
+        callback_progreso: fn(completados, total, id_proceso, desde_cache)
+        modelo_cfg       : Config del modelo. None → usa el default.
+
+    Returns:
+        Lista de dicts con los análisis completados (sin Nones).
     """
     if modelo_cfg is None:
         modelo_cfg = MODELOS_DISPONIBLES[MODELO_DEFAULT_KEY]
 
-    resultados = []
-    total      = len(ofertas)
-    model_id   = modelo_cfg["model_id"]
+    resultados: list[dict] = []
+    total    = len(ofertas)
+    model_id = modelo_cfg["model_id"]
 
     for i, oferta in enumerate(ofertas):
         id_proc   = oferta.get("id_del_proceso", "?")
-        # La clave de caché incluye el modelo para detectar si ya existe
         cache_key = f"{id_proc}_{model_id}"
         en_cache  = cache_key in _cache_analisis
 
@@ -799,34 +869,37 @@ def analizar_ofertas_secuencial(
         if resultado:
             resultados.append(resultado)
 
-        # Solo esperar si la llamada fue REAL (no estaba en caché)
+        # Delay solo en llamadas reales (no caché) y si no es la última
         if not en_cache and i < total - 1:
             time.sleep(delay_segundos)
 
     if callback_progreso:
         callback_progreso(total, total, "✓ Completado", False)
 
+    logger.info(
+        "Análisis batch completado — %d/%d exitosos con %s.",
+        len(resultados), total, model_id,
+    )
     return resultados
 
 
 # =============================================================================
-# RESUMEN EJECUTIVO IA — Post-análisis de todas las ofertas
+# RESUMEN EJECUTIVO IA
 # =============================================================================
-def generar_resumen_ejecutivo(resultados: list, modelo_cfg: dict = None) -> str:
+def generar_resumen_ejecutivo(
+    resultados: list[dict],
+    modelo_cfg: dict | None = None,
+) -> str:
     """
-    Genera un resumen ejecutivo estratégico de todas las ofertas analizadas,
-    con recomendaciones de priorización para el equipo de gestión contractual.
+    Genera un resumen ejecutivo estratégico (150-250 palabras) de todas las
+    ofertas analizadas, con recomendaciones de priorización.
 
-    Parámetros:
-        resultados : Lista de dicts con los análisis de cada oferta
-        modelo_cfg : Config del modelo seleccionado. Si es None usa el default.
+    Args:
+        resultados : Lista de dicts con los análisis de cada oferta.
+        modelo_cfg : Config del modelo. None → usa el default.
 
-    Retorna:
-        str: Texto narrativo del resumen ejecutivo (150-250 palabras)
-
-    BUG CORREGIDO: La versión anterior usaba response_format={"type":"json_object"}
-    pero pedía texto plano → se retornaba un dict que rompía st.markdown() en app.py.
-    Ahora se usa json_mode=False y se retorna directamente el string de la IA.
+    Returns:
+        String con el resumen ejecutivo narrativo.
     """
     if modelo_cfg is None:
         modelo_cfg = MODELOS_DISPONIBLES[MODELO_DEFAULT_KEY]
@@ -838,15 +911,20 @@ def generar_resumen_ejecutivo(resultados: list, modelo_cfg: dict = None) -> str:
     ajustes   = [r for r in resultados if r.get("viabilidad") == "REQUIERE AJUSTES"]
     no_viable = [r for r in resultados if r.get("viabilidad") == "NO VIABLE"]
 
+    prom_aplicabilidad = (
+        int(sum(r.get("porcentaje_aplicabilidad", 0) for r in resultados) / len(resultados))
+        if resultados else 0
+    )
+
+    top_3 = sorted(viables, key=lambda x: x.get("porcentaje_aplicabilidad", 0), reverse=True)[:3]
+
     resumen_data = {
-        "total_analizados"  : len(resultados),
-        "viables"           : len(viables),
-        "requieren_ajustes" : len(ajustes),
-        "no_viables"        : len(no_viable),
-        "promedio_aplicabilidad": (
-            int(sum(r.get("porcentaje_aplicabilidad", 0) for r in resultados) / len(resultados))
-        ),
-        "top_3_oportunidades": [
+        "total_analizados"      : len(resultados),
+        "viables"               : len(viables),
+        "requieren_ajustes"     : len(ajustes),
+        "no_viables"            : len(no_viable),
+        "promedio_aplicabilidad": prom_aplicabilidad,
+        "top_3_oportunidades"   : [
             {
                 "id"        : r.get("id_oferta"),
                 "entidad"   : r.get("entidad"),
@@ -855,11 +933,7 @@ def generar_resumen_ejecutivo(resultados: list, modelo_cfg: dict = None) -> str:
                 "valor"     : r.get("valor_estimado"),
                 "fecha_cie" : r.get("fecha_cierre"),
             }
-            for r in sorted(
-                viables,
-                key=lambda x: x.get("porcentaje_aplicabilidad", 0),
-                reverse=True,
-            )[:3]
+            for r in top_3
         ],
     }
 
@@ -884,93 +958,93 @@ INSTRUCCIONES:
 """
 
     try:
-        # ── BUG CORREGIDO ────────────────────────────────────────────────────
-        # Versión anterior usaba response_format={"type": "json_object"} pero el
-        # prompt pedía texto narrativo → conflicto de tipos → error en UI.
-        # Solución: json_mode=False para texto libre, retornar string directamente.
-        # ─────────────────────────────────────────────────────────────────────
         texto_resumen = llamar_proveedor(
-            prompt     = prompt,
-            modelo_cfg = modelo_cfg,
-            json_mode  = False,   # Resumen ejecutivo → texto narrativo, no JSON
+            prompt=prompt, modelo_cfg=modelo_cfg, json_mode=False,
         )
-
-        # Retornar directamente como string (no json.loads — era el bug anterior)
         return texto_resumen.strip()
-
-    except Exception as e:
-        print(f"[ERROR Resumen Ejecutivo] ({modelo_cfg['model_id']}): {e}")
+    except Exception as exc:
+        logger.error("Error al generar resumen ejecutivo (%s): %s", modelo_cfg["model_id"], exc)
         return "No se pudo generar el resumen ejecutivo automático."
 
 
 # =============================================================================
-# LIMPIAR CACHÉ (para uso desde la UI)
+# GESTIÓN DE CACHÉ
 # =============================================================================
-def limpiar_cache():
+def limpiar_cache() -> None:
     """Limpia el caché de análisis en memoria."""
     global _cache_analisis
     _cache_analisis = {}
-    print("[CACHÉ] Caché limpiado.")
+    logger.info("Caché de análisis limpiado.")
+
+
+def obtener_stats_cache() -> dict[str, int]:
+    """Retorna estadísticas básicas del caché actual."""
+    return {"total_entradas": len(_cache_analisis)}
 
 
 # =============================================================================
-# EXPORTAR REPORTE A EXCEL (mejorado con hoja de resumen)
+# EXPORTAR REPORTE A EXCEL (dos hojas: detalle + resumen)
 # =============================================================================
-def exportar_reporte_excel(resultados: list) -> bytes:
+def exportar_reporte_excel(resultados: list[dict]) -> bytes:
     """
     Convierte la lista de análisis a un archivo Excel con dos hojas:
-    1. Reporte completo detallado
-    2. Resumen ejecutivo con métricas
+    1. Análisis Detallado — una fila por proceso con todos los campos
+    2. Resumen Ejecutivo  — métricas agregadas del batch
+
+    Returns:
+        Bytes del archivo .xlsx listo para st.download_button().
     """
     if not resultados:
         return b""
 
-    # --- Hoja 1: Reporte completo ---
-    filas = []
-    for r in resultados:
-        filas.append({
-            "Prioridad"              : "⭐" if r.get("viabilidad") == "VIABLE" else (
-                                       "🔶" if r.get("viabilidad") == "REQUIERE AJUSTES" else "❌"),
-            "ID Proceso"             : r.get("id_oferta", ""),
-            "Entidad"                : r.get("entidad", ""),
-            "Objeto del Contrato"    : r.get("objeto_contrato", ""),
-            "Código UNSPSC"          : r.get("codigo_unspsc", ""),
-            "Categoría UNSPSC"       : r.get("categoria_unspsc", ""),
-            "¿Match RUP Exacto?"     : "Sí" if r.get("match_unspsc_rup") else "No",
-            "Viabilidad"             : r.get("viabilidad", ""),
-            "% Aplicabilidad"        : r.get("porcentaje_aplicabilidad", 0),
-            "Score Financiero"       : r.get("score_financiero", 0),
-            "Nivel de Competencia"   : r.get("nivel_competencia", ""),
-            "Valor Estimado (COP)"   : r.get("valor_estimado", ""),
-            "Duración del Contrato"  : r.get("duracion_contrato", ""),
-            "Modalidad"              : r.get("modalidad", ""),
-            "Fecha Cierre"           : r.get("fecha_cierre", ""),
-            "Fortalezas"             : " | ".join(r.get("fortalezas", [])),
-            "Riesgos"                : " | ".join(r.get("riesgos", [])),
-            "Acciones de Mejora"     : " | ".join(r.get("acciones_mejora", [])),
-            "Recomendación IA"       : r.get("recomendacion", ""),
-            "Enlace SECOP"           : r.get("enlace_secop", ""),
-        })
+    def prioridad_icon(r: dict) -> str:
+        v = r.get("viabilidad", "")
+        return "⭐" if v == "VIABLE" else ("🔶" if v == "REQUIERE AJUSTES" else "❌")
 
-    df = pd.DataFrame(filas)
-    df = df.sort_values(by=["% Aplicabilidad"], ascending=False)
+    filas = [
+        {
+            "Prioridad"            : prioridad_icon(r),
+            "ID Proceso"           : r.get("id_oferta", ""),
+            "Entidad"              : r.get("entidad", ""),
+            "Objeto del Contrato"  : r.get("objeto_contrato", ""),
+            "Código UNSPSC"        : r.get("codigo_unspsc", ""),
+            "Categoría UNSPSC"     : r.get("categoria_unspsc", ""),
+            "¿Match RUP Exacto?"   : "Sí" if r.get("match_unspsc_rup") else "No",
+            "Viabilidad"           : r.get("viabilidad", ""),
+            "% Aplicabilidad"      : r.get("porcentaje_aplicabilidad", 0),
+            "Score Financiero"     : r.get("score_financiero", 0),
+            "Nivel de Competencia" : r.get("nivel_competencia", ""),
+            "Valor Estimado (COP)" : r.get("valor_estimado", ""),
+            "Duración del Contrato": r.get("duracion_contrato", ""),
+            "Modalidad"            : r.get("modalidad", ""),
+            "Fecha Cierre"         : r.get("fecha_cierre", ""),
+            "Fortalezas"           : " | ".join(r.get("fortalezas", [])),
+            "Riesgos"              : " | ".join(r.get("riesgos", [])),
+            "Acciones de Mejora"   : " | ".join(r.get("acciones_mejora", [])),
+            "Recomendación IA"     : r.get("recomendacion", ""),
+            "Enlace SECOP"         : r.get("enlace_secop", ""),
+        }
+        for r in resultados
+    ]
 
-    # --- Hoja 2: Resumen ---
-    viables = sum(1 for r in resultados if r.get("viabilidad") == "VIABLE")
-    ajustes = sum(1 for r in resultados if r.get("viabilidad") == "REQUIERE AJUSTES")
+    df = pd.DataFrame(filas).sort_values("% Aplicabilidad", ascending=False)
+
+    # Hoja 2: métricas resumidas
+    viables    = sum(1 for r in resultados if r.get("viabilidad") == "VIABLE")
+    ajustes    = sum(1 for r in resultados if r.get("viabilidad") == "REQUIERE AJUSTES")
     no_viables = len(resultados) - viables - ajustes
-    prom_pct = (
+    prom_pct   = (
         int(sum(r.get("porcentaje_aplicabilidad", 0) for r in resultados) / len(resultados))
         if resultados else 0
     )
 
     df_resumen = pd.DataFrame([
-        {"Métrica": "Total Procesos Analizados",    "Valor": len(resultados)},
-        {"Métrica": "Procesos VIABLES",             "Valor": viables},
-        {"Métrica": "Procesos REQUIEREN AJUSTES",   "Valor": ajustes},
-        {"Métrica": "Procesos NO VIABLES",          "Valor": no_viables},
-        {"Métrica": "% Aplicabilidad Promedio",     "Valor": f"{prom_pct}%"},
-        {"Métrica": "Fecha de Generación",          "Valor": datetime.now().strftime("%Y-%m-%d %H:%M")},
+        {"Métrica": "Total Procesos Analizados",  "Valor": len(resultados)},
+        {"Métrica": "Procesos VIABLES",           "Valor": viables},
+        {"Métrica": "Procesos REQUIEREN AJUSTES", "Valor": ajustes},
+        {"Métrica": "Procesos NO VIABLES",        "Valor": no_viables},
+        {"Métrica": "% Aplicabilidad Promedio",   "Valor": f"{prom_pct}%"},
+        {"Métrica": "Fecha de Generación",        "Valor": datetime.now().strftime("%Y-%m-%d %H:%M")},
     ])
 
     buffer = io.BytesIO()
@@ -978,11 +1052,12 @@ def exportar_reporte_excel(resultados: list) -> bytes:
         df.to_excel(writer, index=False, sheet_name="Análisis Detallado")
         df_resumen.to_excel(writer, index=False, sheet_name="Resumen Ejecutivo")
 
-        # Ajuste de anchos
-        for sheet_name in ["Análisis Detallado", "Resumen Ejecutivo"]:
+        for sheet_name in writer.sheets:
             ws = writer.sheets[sheet_name]
             for col in ws.columns:
-                max_len = max((len(str(cell.value or "")) for cell in col), default=10)
+                max_len = max(
+                    (len(str(cell.value or "")) for cell in col), default=10
+                )
                 ws.column_dimensions[col[0].column_letter].width = min(max_len + 4, 65)
 
     return buffer.getvalue()

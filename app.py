@@ -1,18 +1,23 @@
 # =============================================================================
-# app.py — Agente SECOP II con IA (Versión 2.0)
-# Perfil institucional real · Procesamiento paralelo · Caché · Tabs
+# app.py — Agente SECOP II con IA (Versión 3.0)
+# Mejoras: state management robusto, UX mejorada, código más limpio,
+# manejo de errores defensivo, separación clara de responsabilidades
 # =============================================================================
+from __future__ import annotations
+
 import streamlit as st
 import pandas as pd
 from datetime import datetime
 import backend_ia
-import time
 
-# --- CONFIGURACIÓN DE PÁGINA ---
+# =============================================================================
+# CONFIGURACIÓN DE PÁGINA — debe ser el primer comando Streamlit
+# =============================================================================
 st.set_page_config(
     page_title="Agente SECOP II — Gestión Contractual IA",
-    page_icon="Agent_Principal.png",
+    page_icon="🔎",
     layout="wide",
+    initial_sidebar_state="expanded",
 )
 
 # =============================================================================
@@ -21,18 +26,23 @@ st.set_page_config(
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@400;600;800&display=swap');
-html, body, [class*="css"] { font-family: 'Montserrat', sans-serif !important; }
 
+html, body, [class*="css"] {
+    font-family: 'Montserrat', sans-serif !important;
+}
+
+/* Contenedor principal */
 [data-testid="block-container"] {
     background-color: #FFFFFF;
     border-radius: 20px;
-    padding: 36px !important;
-    margin-top: 40px !important;
-    margin-bottom: 40px !important;
-    box-shadow: 0 10px 30px rgba(0, 42, 66, 0.08);
-    max-width: 90% !important;
+    padding: 32px !important;
+    margin-top: 32px !important;
+    margin-bottom: 32px !important;
+    box-shadow: 0 8px 24px rgba(0, 42, 66, 0.07);
+    max-width: 92% !important;
 }
 
+/* Sidebar */
 [data-testid="stSidebar"] { background-color: #002A42 !important; }
 [data-testid="stSidebar"] * { color: #E8F4FD !important; }
 
@@ -42,15 +52,17 @@ html, body, [class*="css"] { font-family: 'Montserrat', sans-serif !important; }
     padding: 10px 15px;
     margin-left: -15px;
     font-weight: bold;
-    border-radius: 0 8px 8px 0; 
+    border-radius: 0 8px 8px 0;
 }
 
+/* Inputs */
 [data-testid="stNumberInput"] input {
-    color: #0083BF !important; /* Azul Unicafam */
+    color: #0083BF !important;
     font-weight: 800 !important;
     font-size: 1.1rem !important;
 }
 
+/* Botones */
 .stButton > button {
     background: linear-gradient(90deg, #1DD2C1 0%, #0083BF 100%) !important;
     color: white !important;
@@ -58,27 +70,43 @@ html, body, [class*="css"] { font-family: 'Montserrat', sans-serif !important; }
     border-radius: 30px !important;
     border: none !important;
     padding: 10px 30px !important;
-    box-shadow: 0 4px 15px rgba(0, 131, 191, 0.3);
-    transition: all 0.3s ease;
+    box-shadow: 0 4px 15px rgba(0, 131, 191, 0.25);
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
 }
-.stButton > button:hover { transform: scale(1.02); }
+.stButton > button:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 6px 20px rgba(0, 131, 191, 0.35);
+}
+.stButton > button:active { transform: translateY(0); }
 
+/* Pill de estado en línea */
 .status-pill {
-    background-color: #D3F5ED; color: #0F7A6A;
-    padding: 6px 15px; border-radius: 20px;
-    font-size: 0.85rem; font-weight: bold;
-    position: absolute; top: -40px; right: 0;
-    display: flex; align-items: center; gap: 8px;
+    background-color: #D3F5ED;
+    color: #0F7A6A;
+    padding: 6px 14px;
+    border-radius: 20px;
+    font-size: 0.82rem;
+    font-weight: bold;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 12px;
 }
 .status-dot {
-    height: 8px; width: 8px; background-color: #1DD2C1;
-    border-radius: 50%; display: inline-block; animation: pulse 2s infinite;
+    height: 8px;
+    width: 8px;
+    background-color: #1DD2C1;
+    border-radius: 50%;
+    display: inline-block;
+    animation: pulse 2s infinite;
 }
 @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
 
+/* Tipografía */
 h1, h2, h3, h4, h5 { color: #002A42 !important; font-weight: 800 !important; }
 p { color: #333333; }
 
+/* Métricas */
 [data-testid="stMetric"] {
     background: linear-gradient(135deg, #F0FAFF 0%, #E8F7F5 100%);
     border-radius: 12px;
@@ -86,62 +114,78 @@ p { color: #333333; }
     border-left: 4px solid #1DD2C1;
 }
 
+/* Expanders */
 .streamlit-expanderHeader { font-weight: 700 !important; font-size: 0.95rem !important; }
 
+/* Chips */
 .unspsc-chip {
     display: inline-block; background: #E8F4FD; color: #0083BF;
     border-radius: 20px; padding: 3px 10px; font-size: 0.78rem;
-    font-weight: 600; margin-right: 5px;
+    font-weight: 600; margin-right: 5px; margin-bottom: 4px;
 }
 .rup-chip {
     display: inline-block; background: #D3F5ED; color: #0F7A6A;
     border-radius: 20px; padding: 3px 10px; font-size: 0.78rem;
-    font-weight: 600; margin-right: 5px;
+    font-weight: 600; margin-right: 5px; margin-bottom: 4px;
 }
 .urgente-chip {
     display: inline-block; background: #FFE5E5; color: #C0392B;
     border-radius: 20px; padding: 3px 10px; font-size: 0.78rem;
-    font-weight: 700; margin-right: 5px; animation: pulse 1.5s infinite;
+    font-weight: 700; margin-right: 5px; margin-bottom: 4px;
+    animation: pulse 1.5s infinite;
 }
+
+/* Cards del perfil */
 .profile-card {
     background: linear-gradient(135deg, #002A42 0%, #004A72 100%);
-    color: white !important; border-radius: 14px;
-    padding: 20px; margin-bottom: 12px;
+    color: white !important;
+    border-radius: 14px;
+    padding: 20px;
+    margin-bottom: 12px;
 }
 .profile-card h4 { color: #1DD2C1 !important; font-size: 0.9rem; margin-bottom: 8px; }
 .profile-card p  { color: #E0F0FF !important; font-size: 0.82rem; line-height: 1.6; }
 
+/* Resumen ejecutivo */
 .executive-summary {
     background: linear-gradient(135deg, #F8FFFD 0%, #EBF9F6 100%);
-    border: 1.5px solid #1DD2C1; border-radius: 14px;
-    padding: 22px; margin-top: 16px;
+    border: 1.5px solid #1DD2C1;
+    border-radius: 14px;
+    padding: 22px;
+    margin-top: 16px;
+}
+
+/* Separador de sección */
+.section-divider {
+    border-top: 2px solid #E8F4FD;
+    margin: 24px 0;
 }
 </style>
 """, unsafe_allow_html=True)
 
 
 # =============================================================================
-# UTILIDADES
+# UTILIDADES — Funciones puras sin efectos secundarios en UI
 # =============================================================================
 def semaforo_tiempo(fecha_str: str) -> str:
-    if fecha_str in ("Fecha inválida", "Sin fecha definida", ""):
+    """Retorna un emoji + texto según los días restantes para el cierre."""
+    if not fecha_str or fecha_str in ("Fecha inválida", "Sin fecha definida"):
         return "⚪ Fecha no disponible"
     try:
-        fecha_cierre   = datetime.strptime(fecha_str, "%Y-%m-%d %H:%M")
-        dias_restantes = (fecha_cierre - datetime.now()).days
-        if dias_restantes < 0:    return "⚫ Proceso cerrado"
-        elif dias_restantes <= 3: return f"🔴 ¡URGENTE! — {dias_restantes} día(s)"
-        elif dias_restantes <= 7: return f"🟡 Precaución — {dias_restantes} días"
-        else:                     return f"🟢 Buen tiempo — {dias_restantes} días"
-    except Exception:
+        dias = (datetime.strptime(fecha_str, "%Y-%m-%d %H:%M") - datetime.now()).days
+        if dias < 0:    return "⚫ Proceso cerrado"
+        if dias <= 3:   return f"🔴 ¡URGENTE! — {dias} día(s)"
+        if dias <= 7:   return f"🟡 Precaución — {dias} días"
+        return f"🟢 Buen tiempo — {dias} días"
+    except (ValueError, TypeError):
         return "⚪ Error en fecha"
 
 
 def dias_para_cierre(fecha_str: str) -> int:
+    """Retorna días enteros para el cierre. 9999 si la fecha no es válida."""
     try:
-        fecha_obj = datetime.strptime(fecha_str, "%Y-%m-%d %H:%M")
-        return (fecha_obj - datetime.now()).days
-    except Exception:
+        return (datetime.strptime(fecha_str, "%Y-%m-%d %H:%M") - datetime.now()).days
+    except (ValueError, TypeError):
         return 9999
 
 
@@ -154,225 +198,183 @@ def icono_viabilidad(v: str) -> str:
 
 
 def score_compuesto(r: dict) -> float:
-    """Score compuesto para ordenamiento: aplicabilidad + bonus urgencia."""
-    pct    = r.get("porcentaje_aplicabilidad", 0)
-    dias   = dias_para_cierre(r.get("fecha_cierre", ""))
-    bonus  = 20 if 0 <= dias <= 3 else (10 if 0 <= dias <= 7 else 0)
-    return pct + bonus
+    """Score de ordenamiento UI: aplicabilidad + bonus por urgencia."""
+    pct  = r.get("porcentaje_aplicabilidad", 0)
+    dias = dias_para_cierre(r.get("fecha_cierre", ""))
+    if 0 <= dias <= 3:  return pct + 20
+    if 0 <= dias <= 7:  return pct + 10
+    return float(pct)
+
+
+def formatear_cuantia(valor: str) -> str:
+    """Formatea un valor numérico como moneda COP o devuelve el string original."""
+    try:
+        return f"${float(valor):,.0f}".replace(",", ".")
+    except (ValueError, TypeError):
+        return str(valor) if valor else "No especificado"
 
 
 # =============================================================================
-# SESSION STATE
+# INICIALIZACIÓN DE SESSION STATE
 # =============================================================================
-for key, default in [
-    ("resultados_analisis", []),
-    ("resumen_ejecutivo", ""),
-    ("ids_en_cache", set()),
-    ("ultimo_analisis", None),
-]:
-    if key not in st.session_state:
-        st.session_state[key] = default
-
-
-# =============================================================================
-# ESTADO EN LÍNEA
-# =============================================================================
-# El status pill se renderiza DESPUÉS de que el sidebar defina modelo_cfg_activo
-# Streamlit ejecuta el script de arriba a abajo, así que colocamos el status
-# pill dinámico luego de la sección del sidebar (ver más abajo en el código)
-_STATUS_PILL_PLACEHOLDER = st.empty()  # Se llena después de leer modelo_cfg_activo
-
-
-# =============================================================================
-# BARRA LATERAL
-# =============================================================================
-try:
-    st.sidebar.image("Agent_lateral.png", width=150)
-except Exception:
-    pass
-
-st.sidebar.markdown("<div class='sidebar-menu-active'>⊞ Panel de Gestión Contractual</div>",
-                    unsafe_allow_html=True)
-st.sidebar.markdown("<br>", unsafe_allow_html=True)
-
-# --- Filtros de resultados ---
-st.sidebar.markdown("#### ☷ Filtros de Resultados")
-filtro_viabilidad = st.sidebar.multiselect(
-    "Veredicto IA:",
-    options=["VIABLE", "REQUIERE AJUSTES", "NO VIABLE"],
-    default=["VIABLE", "REQUIERE AJUSTES", "NO VIABLE"],
-)
-filtro_porcentaje = st.sidebar.slider(
-    "Aplicabilidad mínima (%):", min_value=0, max_value=100, value=0, step=10
-)
-
-st.sidebar.divider()
-
-# --- Búsqueda avanzada ---
-st.sidebar.markdown("#### 🔍 Búsqueda Avanzada")
-
-UNSPSC_OPCIONES = {
-    "86 — Educación y Formación"                    : "86",
-    "80 — Consultoría y Gestión Empresarial"         : "80",
-    "81 — Ingeniería, Investigación y Tecnología"    : "81",
-    "60 — Materiales y Recursos Educativos"          : "60",
-    "45 — Equipos AV y Presentación"                 : "45",
-    "82 — Diseño Artístico y Creativos"              : "82",
-    "84 — Asistencia para el Desarrollo"             : "84",
-    "93 — Desarrollo Social, Urbano y Regional"      : "93",
-    "90 — Turismo y Cultura"                         : "90",
-    "94 — Organizaciones No Gubernamentales"         : "94",
-    "43 — TIC, Software e Infraestructura"           : "43",
-    "55 — Publicaciones y Material Educativo"        : "55",
+_ESTADO_INICIAL: dict = {
+    "resultados_analisis": [],
+    "resumen_ejecutivo"  : "",
+    "ultimo_analisis"    : None,
+    "analisis_en_curso"  : False,
 }
+for clave, valor_default in _ESTADO_INICIAL.items():
+    if clave not in st.session_state:
+        st.session_state[clave] = valor_default
 
-unspsc_seleccionados_labels = st.sidebar.multiselect(
-    "Categorías UNSPSC:",
-    options=list(UNSPSC_OPCIONES.keys()),
-    default=list(UNSPSC_OPCIONES.keys()),
-    help="Filtra los procesos por categoría antes de enviarlos a la IA.",
-)
-codigos_unspsc_activos = [UNSPSC_OPCIONES[l] for l in unspsc_seleccionados_labels]
-TOTAL_CATEGORIAS = len(UNSPSC_OPCIONES)
-unspsc_para_backend = (
-    None
-    if len(codigos_unspsc_activos) == TOTAL_CATEGORIAS or not codigos_unspsc_activos
-    else codigos_unspsc_activos
-)
 
-limite_resultados = st.sidebar.number_input(
-    "Máximo de ofertas a analizar:", min_value=1, max_value=50, value=10, step=1
-)
+# =============================================================================
+# SIDEBAR
+# =============================================================================
+with st.sidebar:
+    # Logo
+    try:
+        st.image("Agent_lateral.png", width=150)
+    except Exception:
+        st.markdown("### 🔎 SECOP IA")
 
-# Tiempo estimado dinámico — se calcula DESPUÉS de definir modelo_cfg_activo
-# Por eso usamos un placeholder que se actualizará en la sección de IA
-# (el sidebar se renderiza de arriba a abajo, delay_recomendado se define luego)
-# Usamos valor conservador aquí; el caption real está en la sección de IA
-tiempo_est_seg = int(limite_resultados) * 4
-st.sidebar.caption(
-    f"⏱️ El tiempo exacto depende del modelo seleccionado. "
-    f"~{int(limite_resultados) * 2}–{int(limite_resultados) * 4} seg aprox. "
-    "♻️ Las que ya están en caché se saltan el delay."
-)
+    st.markdown("<div class='sidebar-menu-active'>⊞ Panel de Gestión Contractual</div>",
+                unsafe_allow_html=True)
+    st.markdown("<br>", unsafe_allow_html=True)
 
-st.sidebar.divider()
-
-# --- Selector de modelo IA ---
-st.sidebar.markdown("#### ⚙️ Configuración de IA")
-
-# Importar el catálogo de modelos desde el backend
-opciones_modelo = list(backend_ia.MODELOS_DISPONIBLES.keys())
-
-modelo_seleccionado_key = st.sidebar.selectbox(
-    "🤖 Modelo de IA:",
-    options=opciones_modelo,
-    index=0,   # LLaMA 3.3 70B por defecto (el que ya usabas)
-    help="Selecciona el modelo que analizará las ofertas de SECOP II.",
-)
-
-# Obtener la configuración completa del modelo seleccionado
-modelo_cfg_activo = backend_ia.MODELOS_DISPONIBLES[modelo_seleccionado_key]
-
-# Mostrar descripción y características del modelo activo
-st.sidebar.caption(f"📝 {modelo_cfg_activo['descripcion']}")
-
-# Indicadores de proveedor y capacidades
-proveedor_label = "☁️ Google AI Studio" if modelo_cfg_activo["proveedor"] == "gemini" else "⚡ Groq LPU"
-json_label      = "✅ JSON nativo" if modelo_cfg_activo["soporta_json_mode"] else "🔧 Post-procesado"
-reason_label    = "🧠 Razonamiento" if modelo_cfg_activo["es_reasoning"] else ""
-
-st.sidebar.markdown(
-    f"`{proveedor_label}` &nbsp; `{json_label}` &nbsp; `{reason_label}`" if reason_label
-    else f"`{proveedor_label}` &nbsp; `{json_label}`",
-    unsafe_allow_html=True,
-)
-
-# Aviso si se selecciona Gemini y no hay clave configurada
-if modelo_cfg_activo["proveedor"] == "gemini" and not backend_ia.GOOGLE_API_KEY:
-    st.sidebar.warning(
-        "⚠️ **GOOGLE_API_KEY** no detectada.\n\n"
-        "Agrega en tu `.env`:\n`GOOGLE_API_KEY=tu_clave`\n\n"
-        "Obtén tu clave gratis en [aistudio.google.com](https://aistudio.google.com)"
+    # ── Filtros de resultados ─────────────────────────────────────────────────
+    st.markdown("#### ☷ Filtros de Resultados")
+    filtro_viabilidad = st.multiselect(
+        "Veredicto IA:",
+        options=["VIABLE", "REQUIERE AJUSTES", "NO VIABLE"],
+        default=["VIABLE", "REQUIERE AJUSTES", "NO VIABLE"],
+    )
+    filtro_porcentaje = st.slider(
+        "Aplicabilidad mínima (%):", min_value=0, max_value=100, value=0, step=10
     )
 
-# Aviso informativo para DeepSeek R1
-if modelo_cfg_activo["es_reasoning"]:
-    st.sidebar.info(
-        "🧠 **Modelo de razonamiento**: genera un proceso de pensamiento interno "
-        "antes de responder. Es más lento pero más reflexivo. "
-        "Los bloques `<think>` se limpian automáticamente."
+    st.divider()
+
+    # ── Búsqueda avanzada ─────────────────────────────────────────────────────
+    st.markdown("#### 🔍 Búsqueda Avanzada")
+
+    UNSPSC_OPCIONES: dict[str, str] = {
+        "86 — Educación y Formación"                : "86",
+        "80 — Consultoría y Gestión Empresarial"    : "80",
+        "81 — Ingeniería, Investigación y Tecnología": "81",
+        "60 — Materiales y Recursos Educativos"     : "60",
+        "45 — Equipos AV y Presentación"            : "45",
+        "82 — Diseño Artístico y Creativos"         : "82",
+        "84 — Asistencia para el Desarrollo"        : "84",
+        "93 — Desarrollo Social, Urbano y Regional" : "93",
+        "90 — Turismo y Cultura"                    : "90",
+        "94 — Organizaciones No Gubernamentales"    : "94",
+        "43 — TIC, Software e Infraestructura"      : "43",
+        "55 — Publicaciones y Material Educativo"   : "55",
+    }
+
+    unspsc_labels = st.multiselect(
+        "Categorías UNSPSC:",
+        options=list(UNSPSC_OPCIONES.keys()),
+        default=list(UNSPSC_OPCIONES.keys()),
+        help="Filtra procesos por categoría antes de enviarlos a la IA.",
+    )
+    codigos_activos = [UNSPSC_OPCIONES[l] for l in unspsc_labels]
+    # Si están todas → no filtrar en backend (más eficiente)
+    unspsc_para_backend = (
+        None
+        if len(codigos_activos) == len(UNSPSC_OPCIONES) or not codigos_activos
+        else codigos_activos
     )
 
-st.sidebar.markdown("<br>", unsafe_allow_html=True)
+    limite_resultados = st.number_input(
+        "Máximo de ofertas a analizar:", min_value=1, max_value=50, value=10, step=1
+    )
 
-# Delay adaptativo: usa el recomendado del modelo pero permite ajuste manual
-delay_recomendado = modelo_cfg_activo["delay_recomendado"]
-delay_groq = st.sidebar.slider(
-    "Delay entre llamadas (seg):",
-    min_value=0.0, max_value=6.0,
-    value=delay_recomendado,   # Se actualiza automáticamente al cambiar modelo
-    step=0.5,
-    help=(
-        "Groq free tier: mínimo 2 s (30 RPM). "
-        "Gemini free tier: mínimo 4 s (15 RPM). "
-        "Con caché activo las repetidas no consumen cuota."
-    ),
-)
+    st.divider()
 
-# Caption dinámico según proveedor
-if modelo_cfg_activo["proveedor"] == "groq":
-    st.sidebar.caption("🆓 **Groq free**: 30 req/min · 1.000 req/día → usa ≥ 2 s")
-else:
-    st.sidebar.caption("🆓 **Gemini free**: 15 req/min · 1.500 req/día → usa ≥ 4 s")
+    # ── Selector de modelo IA ─────────────────────────────────────────────────
+    st.markdown("#### ⚙️ Configuración de IA")
 
-st.sidebar.divider()
+    modelo_seleccionado_key = st.selectbox(
+        "🤖 Modelo de IA:",
+        options=list(backend_ia.MODELOS_DISPONIBLES.keys()),
+        index=0,
+        help="Selecciona el modelo que analizará las ofertas.",
+    )
+    modelo_cfg_activo = backend_ia.MODELOS_DISPONIBLES[modelo_seleccionado_key]
 
-# --- Diagnóstico ---
-st.sidebar.markdown("#### 🔧 Diagnóstico de Conexión")
-if st.sidebar.button("🩺 Probar API SECOP II", use_container_width=True):
-    with st.sidebar:
-        with st.spinner("Probando..."):
+    st.caption(f"📝 {modelo_cfg_activo['descripcion']}")
+
+    proveedor_label = "☁️ Google AI Studio" if modelo_cfg_activo["proveedor"] == "gemini" else "⚡ Groq LPU"
+    json_label      = "✅ JSON nativo" if modelo_cfg_activo["soporta_json_mode"] else "🔧 Post-procesado"
+    reason_label    = "🧠 Razonamiento" if modelo_cfg_activo["es_reasoning"] else ""
+
+    badges = f"`{proveedor_label}` &nbsp; `{json_label}`"
+    if reason_label:
+        badges += f" &nbsp; `{reason_label}`"
+    st.markdown(badges, unsafe_allow_html=True)
+
+    # Avisos contextuales por modelo
+    if modelo_cfg_activo["proveedor"] == "gemini" and not backend_ia.GOOGLE_API_KEY:
+        st.warning(
+            "⚠️ **GOOGLE_API_KEY** no detectada.\n\n"
+            "Agrega en tu `.env`:\n`GOOGLE_API_KEY=tu_clave`\n\n"
+            "Obtén tu clave gratis en [aistudio.google.com](https://aistudio.google.com)"
+        )
+    if modelo_cfg_activo["es_reasoning"]:
+        st.info(
+            "🧠 **Modelo de razonamiento**: genera pensamiento interno antes de responder. "
+            "Más lento pero más reflexivo. Los bloques `<think>` se limpian automáticamente."
+        )
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    delay_groq = st.slider(
+        "Delay entre llamadas (seg):",
+        min_value=0.0, max_value=6.0,
+        value=float(modelo_cfg_activo["delay_recomendado"]),
+        step=0.5,
+        help="Groq free: mínimo 2 s (30 RPM). Gemini free: mínimo 4 s (15 RPM).",
+    )
+
+    caption_delay = (
+        "🆓 **Groq free**: 30 req/min · 1.000 req/día → usa ≥ 2 s"
+        if modelo_cfg_activo["proveedor"] == "groq"
+        else "🆓 **Gemini free**: 15 req/min · 1.500 req/día → usa ≥ 4 s"
+    )
+    st.caption(caption_delay)
+
+    st.divider()
+
+    # ── Diagnóstico ──────────────────────────────────────────────────────────
+    st.markdown("#### 🔧 Diagnóstico de Conexión")
+    if st.button("🩺 Probar API SECOP II", use_container_width=True):
+        with st.spinner("Probando conexión Socrata…"):
             diag = backend_ia.diagnosticar_api()
         if diag["conexion_ok"]:
-            st.sidebar.success(f"✅ Conexión OK — {diag['total_sin_filtro']} registros de muestra")
-            st.sidebar.caption(f"Estados vistos: {diag['muestra_estados']}")
-            st.sidebar.caption(f"IDs: {diag['muestra_ids']}")
+            st.success(f"✅ Conexión OK — {diag['total_sin_filtro']} registros")
+            st.caption(f"Estados: {diag['muestra_estados']}")
+            st.caption(f"IDs: {diag['muestra_ids']}")
         else:
-            st.sidebar.error(f"❌ Error: {diag['error']}")
+            st.error(f"❌ Error: {diag['error']}")
 
-st.sidebar.divider()
+    st.divider()
 
-# --- Caché ---
-st.sidebar.markdown("#### ♻️ Caché de Análisis")
-n_cache = len(backend_ia._cache_analisis)
-st.sidebar.caption(f"Procesos en caché esta sesión: **{n_cache}**")
-if st.sidebar.button("🗑️ Limpiar caché", use_container_width=True):
-    backend_ia.limpiar_cache()
-    st.session_state.resultados_analisis = []
-    st.session_state.resumen_ejecutivo   = ""
-    st.session_state.ultimo_analisis     = None
-    st.rerun()
-
-st.sidebar.divider()
+    # ── Caché ─────────────────────────────────────────────────────────────────
+    st.markdown("#### ♻️ Caché de Análisis")
+    stats_cache = backend_ia.obtener_stats_cache()
+    st.caption(f"Procesos en caché esta sesión: **{stats_cache['total_entradas']}**")
+    if st.button("🗑️ Limpiar caché", use_container_width=True):
+        backend_ia.limpiar_cache()
+        st.session_state.resultados_analisis = []
+        st.session_state.resumen_ejecutivo   = ""
+        st.session_state.ultimo_analisis     = None
+        st.rerun()
 
 
 # =============================================================================
-# STATUS PILL DINÁMICO (se renderiza aquí, después de conocer modelo_cfg_activo)
-# =============================================================================
-modelo_nombre_corto = modelo_seleccionado_key.split("—")[0].strip()  # "🦙 LLaMA 3.3 70B"
-_STATUS_PILL_PLACEHOLDER.markdown(
-    f"""
-<div class="status-pill">
-    <span class="status-dot"></span>
-    En línea · {modelo_nombre_corto} activo &nbsp;👤
-</div>
-""",
-    unsafe_allow_html=True,
-)
-
-
-# =============================================================================
-# TABS PRINCIPALES
+# CONTENIDO PRINCIPAL — TABS
 # =============================================================================
 tab_analisis, tab_dashboard, tab_perfil = st.tabs([
     "🔎 Análisis SECOP II",
@@ -386,36 +388,48 @@ tab_analisis, tab_dashboard, tab_perfil = st.tabs([
 # ─────────────────────────────────────────────────────────────────────────────
 with tab_analisis:
 
-    _, col_centro, _ = st.columns([1, 4, 1])
+    # Status pill dinámico
+    modelo_nombre_corto = modelo_seleccionado_key.split("—")[0].strip()
+    st.markdown(
+        f"<div class='status-pill'>"
+        f"<span class='status-dot'></span>"
+        f"En línea · {modelo_nombre_corto} activo"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
 
+    # Cabecera centrada
+    _, col_centro, _ = st.columns([1, 4, 1])
     with col_centro:
         _, col_logo, _ = st.columns([1.5, 2, 1.5])
         with col_logo:
             try:
                 st.image("Agent_Principal.png", use_container_width=True)
             except Exception:
-                st.warning("⚠️ No se encontró 'Agent_Principal.png'.")
+                st.markdown("## 🔎")
 
         st.markdown(
             "<h3 style='text-align:center;'>Agente IA de Contratación SECOP II</h3>",
             unsafe_allow_html=True,
         )
         st.markdown(
-            "<p style='text-align:center;'>Supervisión inteligente de oportunidades contractuales.<br>"
-            "Análisis en paralelo · Perfil real acreditado · Caché por sesión.</p><br>",
+            "<p style='text-align:center; color:#555;'>"
+            "Supervisión inteligente de oportunidades contractuales.<br>"
+            "Análisis secuencial · Perfil RUP acreditado · Caché por sesión."
+            "</p><br>",
             unsafe_allow_html=True,
         )
 
         palabra_busqueda = st.text_input(
             "Búsqueda por palabra clave (opcional):",
-            placeholder="Ej: Educación virtual, Consultoría TIC, Plataforma e-learning...",
+            placeholder="Ej: Educación virtual, Consultoría TIC, Plataforma e-learning…",
+            help="Filtra la búsqueda en SECOP II antes del análisis IA.",
         )
 
-        col_solo_viables = st.columns(1)[0]
         solo_urgentes = st.checkbox(
-            "🔴 Mostrar primero los que cierran en ≤7 días",
+            "🔴 Priorizar los que cierran en ≤ 7 días",
             value=False,
-            help="Al activar, el análisis priorizará automáticamente los más urgentes.",
+            help="Los urgentes se destacan automáticamente sin necesidad de activar esto.",
         )
 
         st.markdown("<br>", unsafe_allow_html=True)
@@ -425,14 +439,16 @@ with tab_analisis:
                 "🔎 Iniciar análisis inteligente",
                 type="primary",
                 use_container_width=True,
+                disabled=st.session_state.analisis_en_curso,
             )
 
-    # --- LÓGICA DE BÚSQUEDA Y ANÁLISIS ---
+    # ── Lógica de análisis ───────────────────────────────────────────────────
     if btn_analizar:
+        st.session_state.analisis_en_curso  = True
         st.session_state.resultados_analisis = []
         st.session_state.resumen_ejecutivo   = ""
 
-        with st.spinner("Consultando SECOP II — descargando y aplicando pre-filtros..."):
+        with st.spinner("Consultando SECOP II — descargando y aplicando pre-filtros…"):
             ofertas_filtradas = backend_ia.obtener_ofertas_secop(
                 limite=int(limite_resultados),
                 palabra_clave=palabra_busqueda or None,
@@ -444,71 +460,76 @@ with tab_analisis:
                 "⚠️ No se encontraron ofertas relevantes. **Posibles causas:**\n\n"
                 "- El TOKEN de Socrata puede estar inválido o vencido.\n"
                 "- El dataset no tiene registros recientes con esas categorías.\n"
-                "- Prueba el botón **🩺 Probar API SECOP II** en el panel lateral para diagnosticar.\n"
+                "- Prueba el botón **🩺 Probar API SECOP II** en el panel lateral.\n"
                 "- Amplía las categorías UNSPSC o deja la palabra clave vacía."
             )
+            st.session_state.analisis_en_curso = False
         else:
-            # La clave de caché ahora incluye el modelo — calcular correctamente
             model_id_activo = modelo_cfg_activo["model_id"]
-            total     = len(ofertas_filtradas)
-            en_cache  = sum(
+            total      = len(ofertas_filtradas)
+            en_cache   = sum(
                 1 for o in ofertas_filtradas
                 if f"{o.get('id_del_proceso')}_{model_id_activo}" in backend_ia._cache_analisis
             )
             a_analizar = total - en_cache
-            tiempo_est = a_analizar * delay_groq
+            tiempo_est = int(a_analizar * delay_groq)
 
             st.info(
                 f"✅ **{total} oferta(s)** pasaron el pre-filtro — "
                 f"usando **{modelo_seleccionado_key}**\n\n"
                 f"♻️ **{en_cache}** en caché · 🧠 **{a_analizar}** nuevas "
-                f"(tiempo estimado: ~{int(tiempo_est)}–{int(tiempo_est) + 10} seg)"
+                f"(tiempo estimado: ~{tiempo_est}–{tiempo_est + 10} seg)"
             )
 
-            # Texto dinámico en la barra de progreso según proveedor
             proveedor_txt = "Google Gemini" if modelo_cfg_activo["proveedor"] == "gemini" else "Groq"
-            barra      = st.progress(0, text=f"Iniciando análisis con {proveedor_txt}...")
-            status_txt = st.empty()
+            barra         = st.progress(0, text=f"Iniciando análisis con {proveedor_txt}…")
+            status_txt    = st.empty()
 
-            def actualizar_progreso(completados, total_t, id_proc, desde_cache):
+            def actualizar_progreso(completados: int, total_t: int, id_proc: str, desde_cache: bool):
                 pct    = completados / total_t if total_t > 0 else 0
                 origen = "⚡ caché" if desde_cache else f"🧠 {proveedor_txt}"
                 msg    = f"[{completados}/{total_t}] {origen} → {id_proc}"
                 barra.progress(pct, text=msg)
                 status_txt.caption(msg)
 
-            # ── Llamada al backend con el modelo seleccionado ─────────────────
-            # modelo_cfg_activo se pasa para que use Groq, Gemini, etc.
             resultados_nuevos = backend_ia.analizar_ofertas_secuencial(
                 ofertas           = ofertas_filtradas,
                 delay_segundos    = float(delay_groq),
                 callback_progreso = actualizar_progreso,
-                modelo_cfg        = modelo_cfg_activo,   # ← NUEVO: modelo seleccionado
+                modelo_cfg        = modelo_cfg_activo,
             )
 
             st.session_state.resultados_analisis = resultados_nuevos
             st.session_state.ultimo_analisis     = datetime.now().strftime("%Y-%m-%d %H:%M")
+            st.session_state.analisis_en_curso   = False
             barra.empty()
             status_txt.empty()
-            st.success(
-                f"🎉 Análisis completado con **{modelo_seleccionado_key}** — "
-                f"**{len(resultados_nuevos)} oferta(s) evaluadas**. "
-                f"💾 Guardadas en caché para el resto de la sesión."
-            )
 
-            # Resumen ejecutivo IA — también usa el modelo seleccionado
+            n_ok = len(resultados_nuevos)
+            if n_ok > 0:
+                st.success(
+                    f"🎉 Análisis completado con **{modelo_seleccionado_key}** — "
+                    f"**{n_ok} oferta(s) evaluadas**. "
+                    f"💾 Resultados guardados en caché."
+                )
+            else:
+                st.warning(
+                    "⚠️ El análisis terminó pero ninguna oferta generó un resultado válido. "
+                    "Revisa los logs en la consola para más detalles."
+                )
+
+            # Resumen ejecutivo (solo si hay al menos 2 resultados)
             if len(resultados_nuevos) >= 2:
-                with st.spinner(f"Generando resumen ejecutivo con {modelo_nombre_corto}..."):
+                with st.spinner(f"Generando resumen ejecutivo con {modelo_nombre_corto}…"):
                     st.session_state.resumen_ejecutivo = backend_ia.generar_resumen_ejecutivo(
-                        resultados_nuevos,
-                        modelo_cfg = modelo_cfg_activo,   # ← NUEVO: mismo modelo
+                        resultados_nuevos, modelo_cfg=modelo_cfg_activo,
                     )
 
-    # --- SECCIÓN DE RESULTADOS ---
+    # ── Sección de resultados ─────────────────────────────────────────────────
     if st.session_state.resultados_analisis:
         st.divider()
 
-        # Filtros laterales sobre resultados
+        # Aplicar filtros laterales
         resultados_visibles = [
             r for r in st.session_state.resultados_analisis
             if r.get("viabilidad", "NO VIABLE") in filtro_viabilidad
@@ -521,18 +542,23 @@ with tab_analisis:
             total_vis = len(resultados_visibles)
             viables   = sum(1 for r in resultados_visibles if r.get("viabilidad") == "VIABLE")
             ajustes   = sum(1 for r in resultados_visibles if r.get("viabilidad") == "REQUIERE AJUSTES")
-            promedio  = int(sum(r.get("porcentaje_aplicabilidad", 0) for r in resultados_visibles) / total_vis)
-            urgentes  = sum(1 for r in resultados_visibles if 0 <= dias_para_cierre(r.get("fecha_cierre","")) <= 7)
+            promedio  = int(
+                sum(r.get("porcentaje_aplicabilidad", 0) for r in resultados_visibles) / total_vis
+            )
+            urgentes  = sum(
+                1 for r in resultados_visibles
+                if 0 <= dias_para_cierre(r.get("fecha_cierre", "")) <= 7
+            )
 
-            # --- Métricas resumen ---
+            # KPIs rápidos
             c1, c2, c3, c4, c5 = st.columns(5)
-            c1.metric("📊 Analizadas",      total_vis)
-            c2.metric("✅ Viables",          viables)
-            c3.metric("⚠️ Con Ajustes",     ajustes)
-            c4.metric("📈 Aplicabilidad",   f"{promedio}%")
-            c5.metric("🔴 Urgentes (≤7d)",  urgentes)
+            c1.metric("📊 Analizadas",    total_vis)
+            c2.metric("✅ Viables",       viables)
+            c3.metric("⚠️ Con Ajustes",  ajustes)
+            c4.metric("📈 Aplicabilidad", f"{promedio}%")
+            c5.metric("🔴 Urgentes",      urgentes)
 
-            # --- Resumen Ejecutivo IA ---
+            # Resumen ejecutivo IA
             if st.session_state.resumen_ejecutivo:
                 st.markdown("<div class='executive-summary'>", unsafe_allow_html=True)
                 st.markdown("#### 🧠 Resumen Ejecutivo Estratégico")
@@ -541,13 +567,13 @@ with tab_analisis:
                     st.caption(f"Generado: {st.session_state.ultimo_analisis}")
                 st.markdown("</div>", unsafe_allow_html=True)
 
-            # --- Botón Exportar ---
+            # Botón de exportación
             st.markdown("<br>", unsafe_allow_html=True)
-            col_exp1, col_exp2, _ = st.columns([1, 2, 3])
-            with col_exp2:
+            _, col_exp, _ = st.columns([1, 2, 3])
+            with col_exp:
                 excel_bytes = backend_ia.exportar_reporte_excel(resultados_visibles)
                 if excel_bytes:
-                    nombre_archivo = f"reporte_viabilidad_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+                    nombre_archivo = f"reporte_secop_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
                     st.download_button(
                         label="📥 Exportar Reporte Excel (2 hojas)",
                         data=excel_bytes,
@@ -558,33 +584,32 @@ with tab_analisis:
 
             st.divider()
 
-            # --- Alertas urgentes ---
+            # Alertas urgentes (destacadas al inicio)
             urgentes_lista = [
                 r for r in resultados_visibles
-                if 0 <= dias_para_cierre(r.get("fecha_cierre","")) <= 7
+                if 0 <= dias_para_cierre(r.get("fecha_cierre", "")) <= 7
                 and r.get("viabilidad") in ("VIABLE", "REQUIERE AJUSTES")
             ]
             if urgentes_lista:
                 st.markdown("### 🔴 Procesos Urgentes — Cierran en ≤ 7 días")
-                for r in sorted(urgentes_lista, key=lambda x: dias_para_cierre(x.get("fecha_cierre",""))):
-                    dias = dias_para_cierre(r.get("fecha_cierre",""))
+                for r in sorted(urgentes_lista, key=lambda x: dias_para_cierre(x.get("fecha_cierre", ""))):
+                    dias = dias_para_cierre(r.get("fecha_cierre", ""))
                     st.markdown(
-                        f"<span class='urgente-chip'>🔴 {dias} días</span> "
-                        f"**{r.get('id_oferta','')}** — {r.get('entidad','')} · "
-                        f"_{r.get('objeto_contrato','')}_",
+                        f"<span class='urgente-chip'>🔴 {dias} día(s)</span> "
+                        f"**{r.get('id_oferta', '')}** — {r.get('entidad', '')} · "
+                        f"_{r.get('objeto_contrato', '')}_",
                         unsafe_allow_html=True,
                     )
                 st.divider()
 
-            # --- Listado completo ---
+            # Listado detallado ordenado
             st.subheader("📋 Detalle del Análisis por Proceso")
 
-            # Ordenamiento: score compuesto (aplicabilidad + urgencia), VIABLE primero
-            orden_viab = {"VIABLE": 0, "REQUIERE AJUSTES": 1, "NO VIABLE": 2}
+            ORDEN_VIAB = {"VIABLE": 0, "REQUIERE AJUSTES": 1, "NO VIABLE": 2}
             resultados_ord = sorted(
                 resultados_visibles,
                 key=lambda r: (
-                    orden_viab.get(r.get("viabilidad", "NO VIABLE"), 3),
+                    ORDEN_VIAB.get(r.get("viabilidad", "NO VIABLE"), 3),
                     -score_compuesto(r),
                 ),
             )
@@ -597,24 +622,26 @@ with tab_analisis:
                 color       = color_viabilidad(viabilidad)
                 entidad     = oferta.get("entidad", "Sin entidad")
                 objeto      = oferta.get("objeto_contrato", oferta.get("id_oferta", ""))
-                categoria   = oferta.get("categoria_unspsc", "")
                 codigo_u    = oferta.get("codigo_unspsc", "")
+                categoria   = oferta.get("categoria_unspsc", "")
                 competencia = oferta.get("nivel_competencia", "")
                 duracion_c  = oferta.get("duracion_contrato", "")
                 match_rup   = oferta.get("match_unspsc_rup", False)
                 dias_cierre = dias_para_cierre(oferta.get("fecha_cierre", ""))
+                valor_fmt   = formatear_cuantia(oferta.get("valor_estimado", ""))
 
-                icono_comp   = {"BAJO": "🟢", "MEDIO": "🟡", "ALTO": "🔴"}.get(competencia, "⚪")
+                icono_comp    = {"BAJO": "🟢", "MEDIO": "🟡", "ALTO": "🔴"}.get(competencia, "⚪")
                 urgente_badge = " 🔴" if 0 <= dias_cierre <= 7 else ""
-                rup_badge     = " ⭐RUP" if match_rup else ""
+                rup_badge     = " ⭐" if match_rup else ""
 
                 etiqueta = (
                     f"{icono} {oferta.get('id_oferta', 'Sin ID')} — "
                     f"{entidad[:40]} · {porcentaje}% aplicable{urgente_badge}{rup_badge}"
                 )
 
-                with st.expander(etiqueta, expanded=(viabilidad == "VIABLE" and dias_cierre <= 7)):
+                auto_expand = viabilidad == "VIABLE" and 0 <= dias_cierre <= 7
 
+                with st.expander(etiqueta, expanded=auto_expand):
                     # Chips de estado
                     chips = f"<span class='unspsc-chip'>UNSPSC {codigo_u} · {categoria}</span>"
                     if match_rup:
@@ -623,11 +650,12 @@ with tab_analisis:
                         chips += f"<span class='urgente-chip'>🔴 Cierra en {dias_cierre} día(s)</span>"
 
                     st.markdown(f"**📌 Objeto:** {objeto} &nbsp;&nbsp;{chips}", unsafe_allow_html=True)
+                    st.markdown("---")
 
-                    # Metadatos clave
+                    # Metadatos en columnas
                     col_m1, col_m2, col_m3, col_m4, col_m5 = st.columns(5)
                     col_m1.markdown(f"**Modalidad**\n\n`{oferta.get('modalidad', 'N/D')}`")
-                    col_m2.markdown(f"**Valor estimado**\n\n`${oferta.get('valor_estimado', 'N/D')} COP`")
+                    col_m2.markdown(f"**Valor estimado**\n\n`{valor_fmt} COP`")
                     col_m3.markdown(f"**Duración**\n\n`{duracion_c or 'N/D'}`")
                     col_m4.markdown(f"**Competencia**\n\n{icono_comp} `{competencia or 'N/D'}`")
                     col_m5.markdown(f"**Score Financiero**\n\n`{score_fin}/100`")
@@ -641,35 +669,32 @@ with tab_analisis:
                             unsafe_allow_html=True,
                         )
                         st.progress(porcentaje / 100.0)
-                        st.markdown(f"*{porcentaje}% de aplicabilidad institucional*")
+                        st.caption(f"{porcentaje}% de aplicabilidad institucional")
                         st.markdown("<br>", unsafe_allow_html=True)
-                        st.info(f"**💡 Recomendación estratégica:** {oferta.get('recomendacion', '')}")
+                        st.info(f"**💡 Recomendación:** {oferta.get('recomendacion', '')}")
 
-                        tab_f, tab_r, tab_a = st.tabs(["💪 Fortalezas", "⚠️ Riesgos", "🛠️ Acciones de Mejora"])
+                        tab_f, tab_r, tab_a = st.tabs(["💪 Fortalezas", "⚠️ Riesgos", "🛠️ Acciones"])
 
                         with tab_f:
-                            fortalezas = oferta.get("fortalezas", [])
-                            if fortalezas:
-                                for f in fortalezas:
-                                    st.markdown(f"- ✅ {f}")
-                            else:
+                            fortalezas = oferta.get("fortalezas") or []
+                            for item in fortalezas:
+                                st.markdown(f"- ✅ {item}")
+                            if not fortalezas:
                                 st.caption("Sin fortalezas identificadas.")
 
                         with tab_r:
-                            riesgos = oferta.get("riesgos", [])
-                            if riesgos:
-                                for r in riesgos:
-                                    st.markdown(f"- 🔺 {r}")
-                            else:
+                            riesgos = oferta.get("riesgos") or []
+                            for item in riesgos:
+                                st.markdown(f"- 🔺 {item}")
+                            if not riesgos:
                                 st.caption("Sin riesgos identificados.")
 
                         with tab_a:
-                            acciones = oferta.get("acciones_mejora", [])
-                            if acciones:
-                                for a in acciones:
-                                    st.markdown(f"- 🛠️ {a}")
-                            else:
-                                st.caption("Sin acciones de mejora recomendadas.")
+                            acciones = oferta.get("acciones_mejora") or []
+                            for item in acciones:
+                                st.markdown(f"- 🛠️ {item}")
+                            if not acciones:
+                                st.caption("Sin acciones recomendadas.")
 
                     with col_der:
                         st.markdown("**⏰ Tiempo para cierre:**")
@@ -692,26 +717,25 @@ with tab_dashboard:
     if not resultados:
         st.info("💡 Ejecuta un análisis en la pestaña **🔎 Análisis SECOP II** para ver el dashboard.")
     else:
-        total_r = len(resultados)
+        total_r   = len(resultados)
         viables_r = sum(1 for r in resultados if r.get("viabilidad") == "VIABLE")
         ajustes_r = sum(1 for r in resultados if r.get("viabilidad") == "REQUIERE AJUSTES")
         noviabl_r = total_r - viables_r - ajustes_r
         prom_pct  = int(sum(r.get("porcentaje_aplicabilidad", 0) for r in resultados) / total_r)
-        urg_r     = sum(1 for r in resultados if 0 <= dias_para_cierre(r.get("fecha_cierre","")) <= 7)
+        urg_r     = sum(1 for r in resultados if 0 <= dias_para_cierre(r.get("fecha_cierre", "")) <= 7)
         rup_exact = sum(1 for r in resultados if r.get("match_unspsc_rup"))
 
         # KPIs
         c1, c2, c3, c4, c5, c6 = st.columns(6)
-        c1.metric("📂 Total Analizadas",    total_r)
-        c2.metric("✅ Viables",             viables_r)
-        c3.metric("⚠️ Con Ajustes",        ajustes_r)
-        c4.metric("❌ No Viables",         noviabl_r)
-        c5.metric("📈 Aplicabilidad Prom.", f"{prom_pct}%")
-        c6.metric("⭐ Match RUP Exacto",   rup_exact)
+        c1.metric("📂 Total",          total_r)
+        c2.metric("✅ Viables",        viables_r)
+        c3.metric("⚠️ Ajustes",        ajustes_r)
+        c4.metric("❌ No Viables",     noviabl_r)
+        c5.metric("📈 Aplicab. Prom.", f"{prom_pct}%")
+        c6.metric("⭐ Match RUP",      rup_exact)
 
         st.divider()
 
-        # --- Distribución de viabilidad ---
         col_chart1, col_chart2 = st.columns(2)
 
         with col_chart1:
@@ -723,20 +747,21 @@ with tab_dashboard:
             st.bar_chart(df_viab.set_index("Viabilidad"), color="#1DD2C1")
 
         with col_chart2:
-            st.markdown("#### Aplicabilidad por Proceso (Top 15)")
+            st.markdown("#### Top 15 por Aplicabilidad")
+            top15 = sorted(resultados, key=lambda x: x.get("porcentaje_aplicabilidad", 0), reverse=True)[:15]
             df_top = pd.DataFrame([
                 {
                     "Proceso"       : f"{r.get('id_oferta','?')[:12]}…",
                     "Aplicabilidad" : r.get("porcentaje_aplicabilidad", 0),
                 }
-                for r in sorted(resultados, key=lambda x: x.get("porcentaje_aplicabilidad", 0), reverse=True)[:15]
+                for r in top15
             ])
             st.bar_chart(df_top.set_index("Proceso"), color="#0083BF")
 
         st.divider()
 
-        # --- Tabla consolidada ---
-        st.markdown("#### 📋 Tabla Consolidada de Resultados")
+        # Tabla consolidada
+        st.markdown("#### 📋 Tabla Consolidada")
         df_tabla = pd.DataFrame([
             {
                 "ID"            : r.get("id_oferta", ""),
@@ -747,19 +772,18 @@ with tab_dashboard:
                 "Competencia"   : r.get("nivel_competencia", ""),
                 "Cierre"        : r.get("fecha_cierre", ""),
                 "Match RUP"     : "⭐ Sí" if r.get("match_unspsc_rup") else "No",
-                "Valor (COP)"   : r.get("valor_estimado", ""),
+                "Valor (COP)"   : formatear_cuantia(r.get("valor_estimado", "")),
             }
             for r in sorted(resultados, key=lambda x: x.get("porcentaje_aplicabilidad", 0), reverse=True)
         ])
         st.dataframe(df_tabla, use_container_width=True, hide_index=True)
 
-        # Export desde dashboard
         excel_dash = backend_ia.exportar_reporte_excel(resultados)
         if excel_dash:
             st.download_button(
                 label="📥 Descargar Excel Completo",
                 data=excel_dash,
-                file_name=f"dashboard_contractual_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                file_name=f"dashboard_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
 
@@ -777,44 +801,54 @@ with tab_perfil:
     col_p1, col_p2 = st.columns(2)
 
     with col_p1:
-        st.markdown("<div class='profile-card'><h4>📋 Datos Generales</h4><p>"
-                    "• Trayectoria: <b>17+ años</b> (constitución 2008)<br>"
-                    "• Proponente RUP vigente desde: <b>2016</b><br>"
-                    "• Contratos ejecutados: <b>+50</b><br>"
-                    "• Cobertura: <b>Nacional</b><br>"
-                    "• Participación en consorcios y U. Temporales: <b>Sí</b>"
-                    "</p></div>", unsafe_allow_html=True)
-
-        st.markdown("<div class='profile-card'><h4>💰 Indicadores Financieros (RUP 2024)</h4><p>"
-                    "• Índice de Liquidez: <b>1.36</b> — Aceptable<br>"
-                    "• Índice de Endeudamiento: <b>0.59</b> — Aceptable (límite 0.60)<br>"
-                    "• Razón Ácida: No reportada explícitamente<br>"
-                    "• Estado financiero: <b>Vigente — sin alertas críticas</b>"
-                    "</p></div>", unsafe_allow_html=True)
+        st.markdown(
+            "<div class='profile-card'><h4>📋 Datos Generales</h4><p>"
+            "• Trayectoria: <b>17+ años</b> (constitución 2008)<br>"
+            "• Proponente RUP vigente desde: <b>2016</b><br>"
+            "• Contratos ejecutados: <b>+50</b><br>"
+            "• Cobertura: <b>Nacional</b><br>"
+            "• Participación en consorcios y U. Temporales: <b>Sí</b>"
+            "</p></div>",
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            "<div class='profile-card'><h4>💰 Indicadores Financieros (RUP 2024)</h4><p>"
+            "• Índice de Liquidez: <b>1.36</b> — Aceptable<br>"
+            "• Índice de Endeudamiento: <b>0.59</b> — Aceptable (límite 0.60)<br>"
+            "• Razón Ácida: No reportada explícitamente<br>"
+            "• Estado financiero: <b>Vigente — sin alertas críticas</b>"
+            "</p></div>",
+            unsafe_allow_html=True,
+        )
 
     with col_p2:
-        st.markdown("<div class='profile-card'><h4>🎯 Áreas de Alta Competencia</h4><p>"
-                    "• Educación superior y politécnicos (86121700)<br>"
-                    "• E-learning y aprendizaje a distancia (86111500)<br>"
-                    "• Capacitación vocacional científica/no científica<br>"
-                    "• Consultoría de negocios y gerencia de proyectos<br>"
-                    "• Ingeniería de software y metodología de sistemas<br>"
-                    "• Desarrollo de recursos humanos y formación docente<br>"
-                    "• Materiales y recursos educativos digitales"
-                    "</p></div>", unsafe_allow_html=True)
-
-        st.markdown("<div class='profile-card'><h4>🚫 Fuera del Perfil (Rechazo automático)</h4><p>"
-                    "• Construcción civil y obras de infraestructura<br>"
-                    "• Suministro de alimentos y bienes físicos<br>"
-                    "• Aseo, limpieza y mantenimiento<br>"
-                    "• Vigilancia y seguridad física<br>"
-                    "• Transporte y manufactura"
-                    "</p></div>", unsafe_allow_html=True)
+        st.markdown(
+            "<div class='profile-card'><h4>🎯 Áreas de Alta Competencia</h4><p>"
+            "• Educación superior y politécnicos (86121700)<br>"
+            "• E-learning y aprendizaje a distancia (86111500)<br>"
+            "• Capacitación vocacional científica/no científica<br>"
+            "• Consultoría de negocios y gerencia de proyectos<br>"
+            "• Ingeniería de software y metodología de sistemas<br>"
+            "• Desarrollo de recursos humanos y formación docente<br>"
+            "• Materiales y recursos educativos digitales"
+            "</p></div>",
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            "<div class='profile-card'><h4>🚫 Fuera del Perfil (Rechazo automático)</h4><p>"
+            "• Construcción civil y obras de infraestructura<br>"
+            "• Suministro de alimentos y bienes físicos<br>"
+            "• Aseo, limpieza y mantenimiento<br>"
+            "• Vigilancia y seguridad física<br>"
+            "• Transporte y manufactura"
+            "</p></div>",
+            unsafe_allow_html=True,
+        )
 
     st.divider()
     st.markdown("#### 🗂️ Códigos UNSPSC Acreditados en RUP (35 códigos)")
 
-    UNSPSC_TABLE = {
+    UNSPSC_TABLE: dict[str, str] = {
         "45111800": "Equipos de presentación de video y sonido",
         "60101100": "Materiales educativos (general)",
         "60105200": "Materiales de aprendizaje interactivo",
@@ -852,9 +886,9 @@ with tab_perfil:
         "94131500": "Organizaciones no gubernamentales",
     }
 
-    df_unspsc = pd.DataFrame(
-        [{"Código UNSPSC": k, "Descripción": v} for k, v in UNSPSC_TABLE.items()]
-    )
+    df_unspsc = pd.DataFrame([
+        {"Código UNSPSC": k, "Descripción": v} for k, v in UNSPSC_TABLE.items()
+    ])
     st.dataframe(df_unspsc, use_container_width=True, hide_index=True, height=500)
 
     st.caption(
