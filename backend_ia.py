@@ -84,6 +84,14 @@ MODELOS_DISPONIBLES: dict[str, dict[str, Any]] = {
         "es_reasoning"     : False,
         "delay_recomendado": 2.0,
     },
+    "🦙 LLaMA 4 Scout — Groq": {
+        "proveedor"        : "groq",
+        "model_id"         : "meta-llama/llama-4-scout-17b-16e-instruct",
+        "descripcion"      : "Última generación de Meta. Multimodal y muy eficiente.",
+        "soporta_json_mode": True,
+        "es_reasoning"     : False,
+        "delay_recomendado": 2.0,
+    },
     "🐋 DeepSeek R1 — Groq": {
         "proveedor"        : "groq",
         "model_id"         : "deepseek-r1-distill-llama-70b",
@@ -99,14 +107,6 @@ MODELOS_DISPONIBLES: dict[str, dict[str, Any]] = {
         "soporta_json_mode": True,
         "es_reasoning"     : False,
         "delay_recomendado": 4.0,  # Free tier: 15 RPM → más conservador
-    },
-    "🦙 LLaMA 4 Scout — Groq": {
-        "proveedor"        : "groq",
-        "model_id"         : "meta-llama/llama-4-scout-17b-16e-instruct",
-        "descripcion"      : "Última generación de Meta. Multimodal y muy eficiente.",
-        "soporta_json_mode": True,
-        "es_reasoning"     : False,
-        "delay_recomendado": 2.0,
     },
 }
 
@@ -474,20 +474,21 @@ def obtener_ofertas_secop(
 # HELPERS MULTI-MODELO
 # =============================================================================
 def _limpiar_respuesta_reasoning(texto: str) -> str:
-    """
-    Los modelos de razonamiento (DeepSeek R1) anteponen un bloque
-    <think>…</think> antes de la respuesta final. Esta función lo elimina.
-
-    Cubre los casos:
-    - Bloque <think>...</think> completo
-    - Bloque <think> sin cierre (truncado por max_tokens) → elimina desde <think> al final
-    - Bloques ```json … ``` que algunos modelos agregan
-    """
-    # Caso 1: bloque cerrado con </think>
+    """Elimina el bloque <think> de DeepSeek de forma segura."""
+    # 1. Borrar el bloque si está cerrado correctamente
     texto = re.sub(r"<think>.*?</think>", "", texto, flags=re.DOTALL | re.IGNORECASE)
-    # Caso 2: bloque abierto sin cerrar (DeepSeek truncado por max_tokens)
-    texto = re.sub(r"<think>.*", "", texto, flags=re.DOTALL | re.IGNORECASE)
-    # Eliminar backticks de bloques de codigo
+    
+    # 2. Si el bloque quedó abierto (truncado), intentamos cortar en el último corchete de cierre }
+    if "<think>" in texto.lower() and "</think>" not in texto.lower():
+        # Busca el inicio de lo que parece ser el JSON (usualmente tras saltos de línea largos)
+        partes = texto.split("```json")
+        if len(partes) > 1:
+            texto = partes[-1]
+        else:
+            # Si no hay bloque de código, borramos solo la etiqueta de apertura y rogamos que el parser JSON haga su magia
+            texto = re.sub(r"<think>", "", texto, flags=re.IGNORECASE)
+
+    # 3. Limpiar backticks de markdown
     texto = re.sub(r"```(?:json)?\s*", "", texto)
     texto = re.sub(r"```", "", texto)
     return texto.strip()
