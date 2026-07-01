@@ -62,6 +62,23 @@ html, body, [class*="css"] {
     font-size: 1.1rem !important;
 }
 
+/* Corregir texto blanco sobre fondo blanco en selectores (selectbox y multiselect) */
+[data-baseweb="select"] * {
+    color: #002A42 !important; 
+}
+ul[role="listbox"] li {
+    color: #002A42 !important;
+}        
+
+/* Badges informativos de IA (Groq, JSON, etc.) */
+[data-testid="stSidebar"] code {
+    color: #002A42 !important;
+    background-color: #E8F4FD !important;
+    font-weight: 700 !important;
+    padding: 2px 6px !important;
+    border-radius: 6px !important;
+}
+            
 /* Botones */
 .stButton > button {
     background: linear-gradient(90deg, #1DD2C1 0%, #0083BF 100%) !important;
