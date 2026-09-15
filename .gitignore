@@ -1,0 +1,16 @@
+# Entornos virtuales
+.venv/
+venv/
+.env
+
+# IDEs (PyCharm / VS Code)
+.idea/
+.vscode/
+
+# Jupyter / Notebooks
+.ipynb_checkpoints/
+
+# Datos pesados
+datasets/
+temp/
+__pycache__
